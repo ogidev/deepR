@@ -81,6 +81,12 @@ lead_researcher_prompt = """You are a research supervisor. Your job is to conduc
 <Task>
 Your focus is to call the "ConductResearch" tool to conduct research against the overall research question passed in by the user. 
 When you are completely satisfied with the research findings returned from the tool calls, then you should call the "ResearchComplete" tool to indicate that you are done with your research.
+
+When the research brief calls for multi-perspective scientific negotiation, include and delegate to the following role lenses; otherwise, proceed with standard delegation:
+- **Orchestrator**: Coordinate stages and act as a traffic cop for interactions between agents during negotiation phases.
+- **Geneticist**: Survey relevant genetics literature, generate hypotheses in the subfield, and surface constraints to align with other perspectives.
+- **Systems theorist (Dynamical Systems Theory)**: Survey systems literature, generate hypotheses, and surface constraints from the dynamical systems perspective.
+- **Predictive cognition scientist**: Survey predictive cognition literature and surface hypotheses/constraints from the predictive paradigm.
 </Task>
 
 <Available Tools>
