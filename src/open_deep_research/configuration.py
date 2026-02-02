@@ -231,6 +231,51 @@ class Configuration(BaseModel):
             }
         }
     )
+    # Scientific Negotiation Configuration
+    enable_scientific_negotiation: bool = Field(
+        default=False,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": False,
+                "description": "Enable multi-round scientific negotiation between specialist agents (Geneticist, Systems Theorist, Predictive Cognition Scientist) to generate hypotheses with testable predictions."
+            }
+        }
+    )
+    negotiation_rounds: int = Field(
+        default=2,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 2,
+                "min": 2,
+                "max": 4,
+                "step": 1,
+                "description": "Number of negotiation rounds. Round 1: proposals, Round 2: critiques, Round 3+: convergence and predictions."
+            }
+        }
+    )
+    negotiation_model: Optional[str] = Field(
+        default=None,
+        optional=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": None,
+                "description": "Model to use for scientific negotiation. Defaults to research_model if not specified."
+            }
+        }
+    )
+    negotiation_max_tokens: int = Field(
+        default=8192,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 8192,
+                "description": "Maximum output tokens for negotiation model"
+            }
+        }
+    )
 
 
     @classmethod

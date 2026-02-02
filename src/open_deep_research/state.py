@@ -1,7 +1,7 @@
 """Graph state definitions and data structures for the Deep Research agent."""
 
 import operator
-from typing import Annotated, Optional
+from typing import Annotated, Dict, List, Optional
 
 from langchain_core.messages import MessageLikeRepresentation
 from langgraph.graph import MessagesState
@@ -17,6 +17,57 @@ class ConductResearch(BaseModel):
     research_topic: str = Field(
         description="The topic to research. Should be a single topic, and should be described in high detail (at least a paragraph).",
     )
+
+
+###################
+# Scientific Negotiation Models
+###################
+class Hypothesis(BaseModel):
+    """A hypothesis generated during scientific negotiation."""
+    
+    id: str = Field(description="Unique identifier for the hypothesis")
+    statement: str = Field(description="The hypothesis statement")
+    rationale: str = Field(description="Reasoning behind the hypothesis")
+    assumptions: List[str] = Field(default_factory=list, description="Key assumptions underlying the hypothesis")
+    key_variables: List[str] = Field(default_factory=list, description="Key variables involved in the hypothesis")
+    supporting_evidence: List[str] = Field(default_factory=list, description="Evidence supporting the hypothesis")
+    counter_evidence: List[str] = Field(default_factory=list, description="Evidence against the hypothesis")
+    confidence: str = Field(default="medium", description="Qualitative confidence level (low/medium/high)")
+    proposing_role: str = Field(default="", description="The specialist role that proposed this hypothesis")
+
+
+class Prediction(BaseModel):
+    """A testable prediction derived from hypotheses."""
+    
+    hypothesis_ids: List[str] = Field(description="IDs of hypotheses this prediction relates to")
+    prediction: str = Field(description="The specific testable prediction")
+    test_method: str = Field(description="Method to test this prediction")
+    required_data: List[str] = Field(default_factory=list, description="Data required to test the prediction")
+    expected_if_true: str = Field(default="", description="Expected outcome if prediction is true")
+    expected_if_false: str = Field(default="", description="Expected outcome if prediction is false")
+
+
+class Disagreement(BaseModel):
+    """A documented disagreement between specialists."""
+    
+    topic: str = Field(description="The topic of disagreement")
+    positions_by_role: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of role name to their position on the topic"
+    )
+    what_data_would_resolve: str = Field(
+        default="",
+        description="What data or evidence would help resolve this disagreement"
+    )
+
+
+class HypothesesBundle(BaseModel):
+    """Complete output from scientific negotiation process."""
+    
+    hypotheses: List[Hypothesis] = Field(default_factory=list, description="List of generated hypotheses")
+    predictions: List[Prediction] = Field(default_factory=list, description="Testable predictions")
+    open_questions: List[str] = Field(default_factory=list, description="Remaining open questions")
+    disagreements: List[Disagreement] = Field(default_factory=list, description="Documented disagreements")
 
 class ResearchComplete(BaseModel):
     """Call this tool to indicate that the research is complete."""
@@ -70,6 +121,9 @@ class AgentState(MessagesState):
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
+    # Scientific negotiation outputs
+    hypotheses_bundle: Optional[HypothesesBundle] = None
+    negotiation_messages: Annotated[list[MessageLikeRepresentation], override_reducer] = []
 
 class SupervisorState(TypedDict):
     """State for the supervisor that manages research tasks."""
@@ -79,6 +133,26 @@ class SupervisorState(TypedDict):
     notes: Annotated[list[str], override_reducer] = []
     research_iterations: int = 0
     raw_notes: Annotated[list[str], override_reducer] = []
+
+
+class NegotiationState(TypedDict):
+    """State for the scientific negotiation subgraph."""
+    
+    research_brief: str
+    notes: List[str]
+    raw_notes: List[str]
+    # Current round in the negotiation process (1-indexed)
+    current_round: int
+    max_rounds: int
+    # Per-specialist proposal buffers
+    geneticist_proposals: List[Hypothesis]
+    systems_theorist_proposals: List[Hypothesis]
+    predictive_cognition_proposals: List[Hypothesis]
+    # Critique and convergence data
+    critiques: Annotated[list[str], operator.add]
+    # Final outputs
+    hypotheses_bundle: Optional[HypothesesBundle]
+    negotiation_messages: Annotated[list[MessageLikeRepresentation], operator.add]
 
 class ResearcherState(TypedDict):
     """State for individual researchers conducting research."""
