@@ -1,7 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
-from typing import Literal
+from typing import Any, Dict, List, Literal
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
@@ -24,8 +24,15 @@ from open_deep_research.prompts import (
     compress_research_simple_human_message,
     compress_research_system_prompt,
     final_report_generation_prompt,
+    geneticist_system_prompt,
     lead_researcher_prompt,
+    negotiation_synthesis_prompt,
+    predictive_cognition_system_prompt,
     research_system_prompt,
+    specialist_convergence_instructions,
+    specialist_critique_round_instructions,
+    specialist_proposal_round_instructions,
+    systems_theorist_system_prompt,
     transform_messages_into_research_topic_prompt,
 )
 from open_deep_research.state import (
@@ -33,6 +40,9 @@ from open_deep_research.state import (
     AgentState,
     ClarifyWithUser,
     ConductResearch,
+    Hypothesis,
+    HypothesesBundle,
+    NegotiationState,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
@@ -604,11 +614,674 @@ researcher_builder.add_edge("compress_research", END)      # Exit point after co
 # Compile researcher subgraph for parallel execution by supervisor
 researcher_subgraph = researcher_builder.compile()
 
+
+###################
+# Scientific Negotiation Subgraph
+###################
+
+# Constants for hypothesis parsing and synthesis
+MAX_HYPOTHESIS_STATEMENT_LENGTH = 500  # Max chars for hypothesis statement
+MAX_HYPOTHESIS_RATIONALE_LENGTH = 300  # Max chars for rationale
+MAX_HYPOTHESIS_ASSUMPTION_LENGTH = 200  # Max chars for each assumption
+MAX_HYPOTHESIS_VARIABLE_LENGTH = 100   # Max chars for each variable
+MAX_FALLBACK_HYPOTHESES = 8  # Max hypotheses to include in fallback bundle
+NUM_SPECIALISTS = 3  # Number of specialist agents in negotiation
+INITIAL_ROUNDS_MESSAGE_COUNT = 6  # Messages before convergence (orchestrator + specialists × 2 rounds)
+
+
+def _get_round_purpose(current_round: int, max_rounds: int) -> str:
+    """Get the purpose description for the current negotiation round."""
+    if current_round == 1:
+        return "Independent Proposals - Generate 3-6 hypotheses from your specialist perspective"
+    elif current_round == 2:
+        return "Cross-Critique - Critique at least 2 hypotheses from other specialists"
+    else:
+        return "Convergence & Predictions - Converge on strongest hypotheses and generate testable predictions"
+
+
+def _format_proposals_for_critique(
+    geneticist_proposals: List[Hypothesis],
+    systems_theorist_proposals: List[Hypothesis],
+    predictive_cognition_proposals: List[Hypothesis],
+    exclude_role: str
+) -> str:
+    """Format proposals from other specialists for critique round."""
+    sections = []
+    
+    if exclude_role != "geneticist" and geneticist_proposals:
+        proposals_text = "\n".join([
+            f"  - [{h.id}] {h.statement} (Confidence: {h.confidence})"
+            for h in geneticist_proposals
+        ])
+        sections.append(f"**Geneticist Proposals:**\n{proposals_text}")
+    
+    if exclude_role != "systems_theorist" and systems_theorist_proposals:
+        proposals_text = "\n".join([
+            f"  - [{h.id}] {h.statement} (Confidence: {h.confidence})"
+            for h in systems_theorist_proposals
+        ])
+        sections.append(f"**Systems Theorist Proposals:**\n{proposals_text}")
+    
+    if exclude_role != "predictive_cognition" and predictive_cognition_proposals:
+        proposals_text = "\n".join([
+            f"  - [{h.id}] {h.statement} (Confidence: {h.confidence})"
+            for h in predictive_cognition_proposals
+        ])
+        sections.append(f"**Predictive Cognition Scientist Proposals:**\n{proposals_text}")
+    
+    return "\n\n".join(sections) if sections else "No proposals from other specialists yet."
+
+
+def _format_all_proposals_and_critiques(
+    geneticist_proposals: List[Hypothesis],
+    systems_theorist_proposals: List[Hypothesis],
+    predictive_cognition_proposals: List[Hypothesis],
+    critiques: List[str]
+) -> str:
+    """Format all proposals and critiques for convergence round."""
+    all_proposals = []
+    
+    for h in geneticist_proposals:
+        all_proposals.append(f"[{h.id}] (Geneticist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in systems_theorist_proposals:
+        all_proposals.append(f"[{h.id}] (Systems Theorist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in predictive_cognition_proposals:
+        all_proposals.append(f"[{h.id}] (Predictive Cognition) {h.statement}\n  Rationale: {h.rationale}")
+    
+    critiques_text = "\n".join(critiques) if critiques else "No critiques recorded."
+    
+    return f"""**All Hypotheses:**
+{chr(10).join(all_proposals)}
+
+**Critiques:**
+{critiques_text}"""
+
+
+def _parse_hypotheses_from_response(content: str, role: str, id_prefix: str) -> List[Hypothesis]:
+    """Parse hypotheses from a specialist's response text using heuristic pattern matching.
+    
+    This is a simplified parser that extracts hypothesis-like structures from free-form
+    LLM output. It uses pattern matching to identify hypothesis markers (numbered lists,
+    headers) and extracts associated metadata from subsequent lines.
+    
+    Parsing Strategy:
+    1. Look for common hypothesis markers (e.g., "1.", "H1", "Hypothesis 1")
+    2. Capture the statement from the line containing the marker
+    3. Parse subsequent lines for metadata (rationale, assumptions, variables, confidence)
+    4. Truncate fields to reasonable lengths to prevent excessively long content
+    
+    Limitations:
+    - May miss hypotheses with non-standard formatting
+    - Metadata extraction is keyword-based and may miss nuanced content
+    - Field truncation may cut off important information
+    
+    Note: In production environments with LLMs that reliably support structured output,
+    using `model.with_structured_output(Hypothesis)` would be preferred for reliability.
+    This fallback parser ensures the feature works even when structured output fails.
+    
+    Args:
+        content: Free-form text response from a specialist agent
+        role: The specialist role (e.g., "geneticist", "systems_theorist")
+        id_prefix: Prefix for hypothesis IDs (e.g., "G" for geneticist hypotheses)
+        
+    Returns:
+        List of parsed Hypothesis objects, empty list if no hypotheses detected
+    """
+    hypotheses = []
+    
+    # Split by common hypothesis markers
+    lines = content.split('\n')
+    current_hypothesis = None
+    hypothesis_count = 0
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Check for numbered hypothesis markers
+        if (line.startswith(('1.', '2.', '3.', '4.', '5.', '6.', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 
+                             'Hypothesis 1', 'Hypothesis 2', 'Hypothesis 3', 'Hypothesis 4',
+                             '**Hypothesis', '- Hypothesis'))):
+            if current_hypothesis:
+                hypotheses.append(current_hypothesis)
+            
+            hypothesis_count += 1
+            # Extract the statement (text after the marker)
+            statement = line.split(':', 1)[-1].strip() if ':' in line else line
+            statement = statement.lstrip('0123456789.-) ').strip()
+            
+            current_hypothesis = Hypothesis(
+                id=f"{id_prefix}{hypothesis_count}",
+                statement=statement[:MAX_HYPOTHESIS_STATEMENT_LENGTH],
+                rationale="",
+                assumptions=[],
+                key_variables=[],
+                supporting_evidence=[],
+                counter_evidence=[],
+                confidence="medium",
+                proposing_role=role
+            )
+        elif current_hypothesis:
+            # Try to extract additional fields based on keywords
+            lower_line = line.lower()
+            if 'rationale' in lower_line or 'reasoning' in lower_line:
+                current_hypothesis.rationale = line.split(':', 1)[-1].strip()[:MAX_HYPOTHESIS_RATIONALE_LENGTH]
+            elif 'assumption' in lower_line:
+                current_hypothesis.assumptions.append(line.split(':', 1)[-1].strip()[:MAX_HYPOTHESIS_ASSUMPTION_LENGTH])
+            elif 'variable' in lower_line:
+                current_hypothesis.key_variables.append(line.split(':', 1)[-1].strip()[:MAX_HYPOTHESIS_VARIABLE_LENGTH])
+            elif 'confidence' in lower_line:
+                if 'high' in lower_line:
+                    current_hypothesis.confidence = 'high'
+                elif 'low' in lower_line:
+                    current_hypothesis.confidence = 'low'
+    
+    if current_hypothesis:
+        hypotheses.append(current_hypothesis)
+    
+    return hypotheses
+
+
+async def negotiation_orchestrator(state: NegotiationState, config: RunnableConfig) -> Dict[str, Any]:
+    """Orchestrator node that coordinates the negotiation meeting.
+    
+    Determines the current round, prepares context for specialists,
+    and routes to appropriate round handling.
+    """
+    current_round = state.get("current_round", 1)
+    max_rounds = state.get("max_rounds", 2)
+    
+    # Record orchestration decision
+    round_purpose = _get_round_purpose(current_round, max_rounds)
+    
+    orchestration_message = AIMessage(
+        content=f"[Orchestrator] Starting Round {current_round}/{max_rounds}: {round_purpose}"
+    )
+    
+    return {
+        "negotiation_messages": [orchestration_message],
+        "current_round": current_round
+    }
+
+
+async def _run_specialist_agent(
+    role: str,
+    system_prompt_template: str,
+    state: NegotiationState,
+    config: RunnableConfig,
+    additional_instructions: str
+) -> str:
+    """Run a specialist agent and return its response content."""
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Use negotiation model or fall back to research model
+    model_name = configurable.negotiation_model or configurable.research_model
+    model_config = {
+        "model": model_name,
+        "max_tokens": configurable.negotiation_max_tokens,
+        "api_key": get_api_key_for_model(model_name, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    # Prepare notes context
+    notes = state.get("notes", [])
+    raw_notes = state.get("raw_notes", [])
+    notes_context = "\n".join(notes + raw_notes)[:10000]  # Limit context size
+    
+    # Format system prompt
+    system_prompt = system_prompt_template.format(
+        research_brief=state.get("research_brief", ""),
+        notes=notes_context,
+        current_round=state.get("current_round", 1),
+        max_rounds=state.get("max_rounds", 2),
+        round_purpose=_get_round_purpose(state.get("current_round", 1), state.get("max_rounds", 2)),
+        additional_instructions=additional_instructions
+    )
+    
+    model = configurable_model.with_config(model_config)
+    
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content="Please provide your specialist contribution for this round.")
+    ]
+    
+    response = await model.ainvoke(messages)
+    return str(response.content)
+
+
+async def geneticist_agent(state: NegotiationState, config: RunnableConfig) -> Dict[str, Any]:
+    """Geneticist specialist agent node."""
+    current_round = state.get("current_round", 1)
+    
+    # Prepare additional instructions based on round
+    if current_round == 1:
+        additional_instructions = specialist_proposal_round_instructions
+    elif current_round == 2:
+        other_proposals = _format_proposals_for_critique(
+            state.get("geneticist_proposals", []),
+            state.get("systems_theorist_proposals", []),
+            state.get("predictive_cognition_proposals", []),
+            exclude_role="geneticist"
+        )
+        additional_instructions = specialist_critique_round_instructions.format(
+            other_proposals=other_proposals
+        )
+    else:
+        proposals_and_critiques = _format_all_proposals_and_critiques(
+            state.get("geneticist_proposals", []),
+            state.get("systems_theorist_proposals", []),
+            state.get("predictive_cognition_proposals", []),
+            state.get("critiques", [])
+        )
+        additional_instructions = specialist_convergence_instructions.format(
+            proposals_and_critiques=proposals_and_critiques
+        )
+    
+    content = await _run_specialist_agent(
+        role="geneticist",
+        system_prompt_template=geneticist_system_prompt,
+        state=state,
+        config=config,
+        additional_instructions=additional_instructions
+    )
+    
+    result: Dict[str, Any] = {
+        "negotiation_messages": [AIMessage(content=f"[Geneticist] {content}")]
+    }
+    
+    # Parse proposals in round 1
+    if current_round == 1:
+        proposals = _parse_hypotheses_from_response(content, "geneticist", "G")
+        result["geneticist_proposals"] = proposals
+    elif current_round == 2:
+        # Store critiques
+        result["critiques"] = [f"[Geneticist Critique] {content}"]
+    
+    return result
+
+
+async def systems_theorist_agent(state: NegotiationState, config: RunnableConfig) -> Dict[str, Any]:
+    """Systems Theorist specialist agent node."""
+    current_round = state.get("current_round", 1)
+    
+    # Prepare additional instructions based on round
+    if current_round == 1:
+        additional_instructions = specialist_proposal_round_instructions
+    elif current_round == 2:
+        other_proposals = _format_proposals_for_critique(
+            state.get("geneticist_proposals", []),
+            state.get("systems_theorist_proposals", []),
+            state.get("predictive_cognition_proposals", []),
+            exclude_role="systems_theorist"
+        )
+        additional_instructions = specialist_critique_round_instructions.format(
+            other_proposals=other_proposals
+        )
+    else:
+        proposals_and_critiques = _format_all_proposals_and_critiques(
+            state.get("geneticist_proposals", []),
+            state.get("systems_theorist_proposals", []),
+            state.get("predictive_cognition_proposals", []),
+            state.get("critiques", [])
+        )
+        additional_instructions = specialist_convergence_instructions.format(
+            proposals_and_critiques=proposals_and_critiques
+        )
+    
+    content = await _run_specialist_agent(
+        role="systems_theorist",
+        system_prompt_template=systems_theorist_system_prompt,
+        state=state,
+        config=config,
+        additional_instructions=additional_instructions
+    )
+    
+    result: Dict[str, Any] = {
+        "negotiation_messages": [AIMessage(content=f"[Systems Theorist] {content}")]
+    }
+    
+    # Parse proposals in round 1
+    if current_round == 1:
+        proposals = _parse_hypotheses_from_response(content, "systems_theorist", "S")
+        result["systems_theorist_proposals"] = proposals
+    elif current_round == 2:
+        result["critiques"] = [f"[Systems Theorist Critique] {content}"]
+    
+    return result
+
+
+async def predictive_cognition_agent(state: NegotiationState, config: RunnableConfig) -> Dict[str, Any]:
+    """Predictive Cognition Scientist specialist agent node."""
+    current_round = state.get("current_round", 1)
+    
+    # Prepare additional instructions based on round
+    if current_round == 1:
+        additional_instructions = specialist_proposal_round_instructions
+    elif current_round == 2:
+        other_proposals = _format_proposals_for_critique(
+            state.get("geneticist_proposals", []),
+            state.get("systems_theorist_proposals", []),
+            state.get("predictive_cognition_proposals", []),
+            exclude_role="predictive_cognition"
+        )
+        additional_instructions = specialist_critique_round_instructions.format(
+            other_proposals=other_proposals
+        )
+    else:
+        proposals_and_critiques = _format_all_proposals_and_critiques(
+            state.get("geneticist_proposals", []),
+            state.get("systems_theorist_proposals", []),
+            state.get("predictive_cognition_proposals", []),
+            state.get("critiques", [])
+        )
+        additional_instructions = specialist_convergence_instructions.format(
+            proposals_and_critiques=proposals_and_critiques
+        )
+    
+    content = await _run_specialist_agent(
+        role="predictive_cognition",
+        system_prompt_template=predictive_cognition_system_prompt,
+        state=state,
+        config=config,
+        additional_instructions=additional_instructions
+    )
+    
+    result: Dict[str, Any] = {
+        "negotiation_messages": [AIMessage(content=f"[Predictive Cognition Scientist] {content}")]
+    }
+    
+    # Parse proposals in round 1
+    if current_round == 1:
+        proposals = _parse_hypotheses_from_response(content, "predictive_cognition", "P")
+        result["predictive_cognition_proposals"] = proposals
+    elif current_round == 2:
+        result["critiques"] = [f"[Predictive Cognition Critique] {content}"]
+    
+    return result
+
+
+async def negotiation_round_router(state: NegotiationState, config: RunnableConfig) -> Dict[str, Any]:
+    """Route to next round or synthesis based on current state."""
+    current_round = state.get("current_round", 1)
+    
+    # Increment round counter for next iteration
+    return {"current_round": current_round + 1}
+
+
+def should_continue_negotiation(state: NegotiationState) -> Literal["specialists", "synthesis"]:
+    """Determine if negotiation should continue or proceed to synthesis."""
+    current_round = state.get("current_round", 1)
+    max_rounds = state.get("max_rounds", 2)
+    
+    if current_round <= max_rounds:
+        return "specialists"
+    return "synthesis"
+
+
+async def negotiation_synthesis(state: NegotiationState, config: RunnableConfig) -> Dict[str, Any]:
+    """Synthesize all negotiation outputs into a structured HypothesesBundle."""
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Use negotiation model or fall back to research model
+    model_name = configurable.negotiation_model or configurable.research_model
+    model_config = {
+        "model": model_name,
+        "max_tokens": configurable.negotiation_max_tokens,
+        "api_key": get_api_key_for_model(model_name, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    # Gather all proposals
+    all_hypotheses = []
+    for h in state.get("geneticist_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Geneticist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in state.get("systems_theorist_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Systems Theorist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in state.get("predictive_cognition_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Predictive Cognition) {h.statement}\n  Rationale: {h.rationale}")
+    
+    all_hypotheses_text = "\n\n".join(all_hypotheses)
+    critiques_text = "\n\n".join(state.get("critiques", []))
+    
+    # Extract convergence notes from messages after initial proposal and critique rounds
+    # INITIAL_ROUNDS_MESSAGE_COUNT accounts for orchestrator + specialists in first 2 rounds
+    messages = state.get("negotiation_messages", [])
+    convergence_notes = ""
+    if len(messages) > INITIAL_ROUNDS_MESSAGE_COUNT:
+        convergence_notes = "\n".join([
+            str(m.content) for m in messages[INITIAL_ROUNDS_MESSAGE_COUNT:]
+            if hasattr(m, 'content')
+        ])[:5000]
+    
+    # Prepare synthesis prompt
+    synthesis_prompt = negotiation_synthesis_prompt.format(
+        research_brief=state.get("research_brief", ""),
+        all_hypotheses=all_hypotheses_text,
+        all_critiques=critiques_text,
+        convergence_notes=convergence_notes
+    )
+    
+    model = configurable_model.with_config(model_config)
+    
+    try:
+        # Try to get structured output
+        structured_model = model.with_structured_output(HypothesesBundle).with_retry(
+            stop_after_attempt=configurable.max_structured_output_retries
+        )
+        
+        response = await structured_model.ainvoke([
+            SystemMessage(content="You are synthesizing scientific negotiation outputs."),
+            HumanMessage(content=synthesis_prompt)
+        ])
+        
+        hypotheses_bundle = response
+        
+    except Exception:
+        # Fall back to manual bundle construction if structured output fails
+        all_proposals = (
+            state.get("geneticist_proposals", []) +
+            state.get("systems_theorist_proposals", []) +
+            state.get("predictive_cognition_proposals", [])
+        )
+        
+        # Create a basic bundle from collected proposals, limiting to top hypotheses
+        hypotheses_bundle = HypothesesBundle(
+            hypotheses=all_proposals[:MAX_FALLBACK_HYPOTHESES],
+            predictions=[],
+            open_questions=[
+                "Further research needed to validate hypotheses",
+                "Cross-disciplinary experiments recommended"
+            ],
+            disagreements=[]
+        )
+    
+    synthesis_message = AIMessage(
+        content=f"[Synthesis Complete] Generated {len(hypotheses_bundle.hypotheses)} hypotheses, "
+                f"{len(hypotheses_bundle.predictions)} predictions, "
+                f"{len(hypotheses_bundle.disagreements)} documented disagreements."
+    )
+    
+    return {
+        "hypotheses_bundle": hypotheses_bundle,
+        "negotiation_messages": [synthesis_message]
+    }
+
+
+# Build the negotiation subgraph
+negotiation_builder = StateGraph(NegotiationState, config_schema=Configuration)
+
+# Add nodes
+negotiation_builder.add_node("orchestrator", negotiation_orchestrator)
+negotiation_builder.add_node("geneticist", geneticist_agent)
+negotiation_builder.add_node("systems_theorist", systems_theorist_agent)
+negotiation_builder.add_node("predictive_cognition", predictive_cognition_agent)
+negotiation_builder.add_node("round_router", negotiation_round_router)
+negotiation_builder.add_node("synthesis", negotiation_synthesis)
+
+# Define edges
+# Entry: orchestrator coordinates the round
+negotiation_builder.add_edge(START, "orchestrator")
+
+# Orchestrator -> all specialists run in parallel
+negotiation_builder.add_edge("orchestrator", "geneticist")
+negotiation_builder.add_edge("orchestrator", "systems_theorist")
+negotiation_builder.add_edge("orchestrator", "predictive_cognition")
+
+# All specialists -> round router (join point)
+negotiation_builder.add_edge("geneticist", "round_router")
+negotiation_builder.add_edge("systems_theorist", "round_router")
+negotiation_builder.add_edge("predictive_cognition", "round_router")
+
+# Round router -> conditional edge: continue or synthesize
+negotiation_builder.add_conditional_edges(
+    "round_router",
+    should_continue_negotiation,
+    {
+        "specialists": "orchestrator",  # Loop back for next round
+        "synthesis": "synthesis"         # Proceed to synthesis
+    }
+)
+
+# Synthesis -> END
+negotiation_builder.add_edge("synthesis", END)
+
+# Compile the negotiation subgraph
+negotiation_subgraph = negotiation_builder.compile()
+
+
+async def scientific_negotiation(state: AgentState, config: RunnableConfig) -> Command[Literal["final_report_generation"]]:
+    """Scientific negotiation node for the main workflow.
+    
+    This node runs the multi-round specialist meeting if enabled in configuration.
+    If disabled, it skips directly to final report generation.
+    
+    Args:
+        state: Current agent state with research findings
+        config: Runtime configuration with negotiation settings
+        
+    Returns:
+        Command to proceed to final report generation, optionally with hypotheses bundle
+    """
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Skip negotiation if not enabled
+    if not configurable.enable_scientific_negotiation:
+        return Command(goto="final_report_generation")
+    
+    # Prepare initial state for negotiation subgraph
+    notes = state.get("notes", [])
+    raw_notes = state.get("raw_notes", [])
+    research_brief = state.get("research_brief", "")
+    
+    negotiation_input = {
+        "research_brief": research_brief,
+        "notes": notes,
+        "raw_notes": raw_notes,
+        "current_round": 1,
+        "max_rounds": configurable.negotiation_rounds,
+        "geneticist_proposals": [],
+        "systems_theorist_proposals": [],
+        "predictive_cognition_proposals": [],
+        "critiques": [],
+        "hypotheses_bundle": None,
+        "negotiation_messages": []
+    }
+    
+    # Run the negotiation subgraph
+    try:
+        result = await negotiation_subgraph.ainvoke(negotiation_input, config)
+        
+        return Command(
+            goto="final_report_generation",
+            update={
+                "hypotheses_bundle": result.get("hypotheses_bundle"),
+                "negotiation_messages": result.get("negotiation_messages", [])
+            }
+        )
+    except Exception as e:
+        # If negotiation fails, continue without it
+        error_message = AIMessage(
+            content=f"[Scientific Negotiation] Failed to complete negotiation: {str(e)}"
+        )
+        return Command(
+            goto="final_report_generation",
+            update={"negotiation_messages": [error_message]}
+        )
+
+
+def _format_hypotheses_bundle_for_report(bundle: HypothesesBundle) -> str:
+    """Format the hypotheses bundle as a section for the final report.
+    
+    Args:
+        bundle: The HypothesesBundle from scientific negotiation
+        
+    Returns:
+        Formatted markdown string for inclusion in the report
+    """
+    sections = ["## Scientific Negotiation Results\n"]
+    sections.append("The following hypotheses were generated through a multi-round scientific negotiation between specialist agents (Geneticist, Systems Theorist, and Predictive Cognition Scientist).\n")
+    
+    # Hypotheses section
+    if bundle.hypotheses:
+        sections.append("### Generated Hypotheses\n")
+        for h in bundle.hypotheses:
+            sections.append(f"**{h.id}: {h.statement}**")
+            sections.append(f"- *Rationale*: {h.rationale}")
+            if h.assumptions:
+                sections.append(f"- *Assumptions*: {', '.join(h.assumptions)}")
+            if h.key_variables:
+                sections.append(f"- *Key Variables*: {', '.join(h.key_variables)}")
+            if h.supporting_evidence:
+                sections.append(f"- *Supporting Evidence*: {'; '.join(h.supporting_evidence)}")
+            if h.counter_evidence:
+                sections.append(f"- *Counter Evidence*: {'; '.join(h.counter_evidence)}")
+            sections.append(f"- *Confidence*: {h.confidence}")
+            if h.proposing_role:
+                sections.append(f"- *Proposed by*: {h.proposing_role}")
+            sections.append("")
+    
+    # Predictions section
+    if bundle.predictions:
+        sections.append("### Testable Predictions\n")
+        for i, p in enumerate(bundle.predictions, 1):
+            sections.append(f"**Prediction {i}**: {p.prediction}")
+            sections.append(f"- *Related Hypotheses*: {', '.join(p.hypothesis_ids)}")
+            sections.append(f"- *Test Method*: {p.test_method}")
+            if p.required_data:
+                sections.append(f"- *Required Data*: {', '.join(p.required_data)}")
+            if p.expected_if_true:
+                sections.append(f"- *Expected if True*: {p.expected_if_true}")
+            if p.expected_if_false:
+                sections.append(f"- *Expected if False*: {p.expected_if_false}")
+            sections.append("")
+    
+    # Open questions section
+    if bundle.open_questions:
+        sections.append("### Open Questions\n")
+        for q in bundle.open_questions:
+            sections.append(f"- {q}")
+        sections.append("")
+    
+    # Disagreements section
+    if bundle.disagreements:
+        sections.append("### Unresolved Disagreements\n")
+        for d in bundle.disagreements:
+            sections.append(f"**Topic**: {d.topic}")
+            for role, position in d.positions_by_role.items():
+                sections.append(f"- *{role}*: {position}")
+            if d.what_data_would_resolve:
+                sections.append(f"- *Resolution Data*: {d.what_data_would_resolve}")
+            sections.append("")
+    
+    return "\n".join(sections)
+
 async def final_report_generation(state: AgentState, config: RunnableConfig):
     """Generate the final comprehensive research report with retry logic for token limits.
     
     This function takes all collected research findings and synthesizes them into a 
     well-structured, comprehensive final report using the configured report generation model.
+    If a hypotheses_bundle exists from scientific negotiation, it is included in the report.
     
     Args:
         state: Agent state containing research findings and context
@@ -621,6 +1294,12 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     notes = state.get("notes", [])
     cleared_state = {"notes": {"type": "override", "value": []}}
     findings = "\n".join(notes)
+    
+    # Step 1b: Include hypotheses bundle if present
+    hypotheses_bundle = state.get("hypotheses_bundle")
+    hypotheses_section = ""
+    if hypotheses_bundle:
+        hypotheses_section = _format_hypotheses_bundle_for_report(hypotheses_bundle)
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
@@ -639,10 +1318,15 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     while current_retry <= max_retries:
         try:
             # Create comprehensive prompt with all research context
+            # Include hypotheses bundle section if available
+            enhanced_findings = findings
+            if hypotheses_section:
+                enhanced_findings = f"{findings}\n\n{hypotheses_section}"
+            
             final_report_prompt = final_report_generation_prompt.format(
                 research_brief=state.get("research_brief", ""),
                 messages=get_buffer_string(state.get("messages", [])),
-                findings=findings,
+                findings=enhanced_findings,
                 date=get_today_str()
             )
             
@@ -708,11 +1392,12 @@ deep_researcher_builder = StateGraph(
 deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
+deep_researcher_builder.add_node("scientific_negotiation", scientific_negotiation) # Scientific negotiation phase
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
 
 # Define main workflow edges for sequential execution
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
-deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
+deep_researcher_builder.add_edge("research_supervisor", "scientific_negotiation")  # Research to negotiation
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
 # Compile the complete deep researcher workflow
