@@ -619,6 +619,16 @@ researcher_subgraph = researcher_builder.compile()
 # Scientific Negotiation Subgraph
 ###################
 
+# Constants for hypothesis parsing and synthesis
+MAX_HYPOTHESIS_STATEMENT_LENGTH = 500  # Max chars for hypothesis statement
+MAX_HYPOTHESIS_RATIONALE_LENGTH = 300  # Max chars for rationale
+MAX_HYPOTHESIS_ASSUMPTION_LENGTH = 200  # Max chars for each assumption
+MAX_HYPOTHESIS_VARIABLE_LENGTH = 100   # Max chars for each variable
+MAX_FALLBACK_HYPOTHESES = 8  # Max hypotheses to include in fallback bundle
+NUM_SPECIALISTS = 3  # Number of specialist agents in negotiation
+INITIAL_ROUNDS_MESSAGE_COUNT = 6  # Messages before convergence (orchestrator + specialists × 2 rounds)
+
+
 def _get_round_purpose(current_round: int, max_rounds: int) -> str:
     """Get the purpose description for the current negotiation round."""
     if current_round == 1:
@@ -688,10 +698,34 @@ def _format_all_proposals_and_critiques(
 
 
 def _parse_hypotheses_from_response(content: str, role: str, id_prefix: str) -> List[Hypothesis]:
-    """Parse hypotheses from a specialist's response text.
+    """Parse hypotheses from a specialist's response text using heuristic pattern matching.
     
-    This is a simplified parser that extracts hypothesis-like structures from free text.
-    In production, structured output would be preferred.
+    This is a simplified parser that extracts hypothesis-like structures from free-form
+    LLM output. It uses pattern matching to identify hypothesis markers (numbered lists,
+    headers) and extracts associated metadata from subsequent lines.
+    
+    Parsing Strategy:
+    1. Look for common hypothesis markers (e.g., "1.", "H1", "Hypothesis 1")
+    2. Capture the statement from the line containing the marker
+    3. Parse subsequent lines for metadata (rationale, assumptions, variables, confidence)
+    4. Truncate fields to reasonable lengths to prevent excessively long content
+    
+    Limitations:
+    - May miss hypotheses with non-standard formatting
+    - Metadata extraction is keyword-based and may miss nuanced content
+    - Field truncation may cut off important information
+    
+    Note: In production environments with LLMs that reliably support structured output,
+    using `model.with_structured_output(Hypothesis)` would be preferred for reliability.
+    This fallback parser ensures the feature works even when structured output fails.
+    
+    Args:
+        content: Free-form text response from a specialist agent
+        role: The specialist role (e.g., "geneticist", "systems_theorist")
+        id_prefix: Prefix for hypothesis IDs (e.g., "G" for geneticist hypotheses)
+        
+    Returns:
+        List of parsed Hypothesis objects, empty list if no hypotheses detected
     """
     hypotheses = []
     
@@ -719,7 +753,7 @@ def _parse_hypotheses_from_response(content: str, role: str, id_prefix: str) -> 
             
             current_hypothesis = Hypothesis(
                 id=f"{id_prefix}{hypothesis_count}",
-                statement=statement[:500] if len(statement) > 500 else statement,
+                statement=statement[:MAX_HYPOTHESIS_STATEMENT_LENGTH],
                 rationale="",
                 assumptions=[],
                 key_variables=[],
@@ -729,14 +763,14 @@ def _parse_hypotheses_from_response(content: str, role: str, id_prefix: str) -> 
                 proposing_role=role
             )
         elif current_hypothesis:
-            # Try to extract additional fields
+            # Try to extract additional fields based on keywords
             lower_line = line.lower()
             if 'rationale' in lower_line or 'reasoning' in lower_line:
-                current_hypothesis.rationale = line.split(':', 1)[-1].strip()[:300]
+                current_hypothesis.rationale = line.split(':', 1)[-1].strip()[:MAX_HYPOTHESIS_RATIONALE_LENGTH]
             elif 'assumption' in lower_line:
-                current_hypothesis.assumptions.append(line.split(':', 1)[-1].strip()[:200])
+                current_hypothesis.assumptions.append(line.split(':', 1)[-1].strip()[:MAX_HYPOTHESIS_ASSUMPTION_LENGTH])
             elif 'variable' in lower_line:
-                current_hypothesis.key_variables.append(line.split(':', 1)[-1].strip()[:100])
+                current_hypothesis.key_variables.append(line.split(':', 1)[-1].strip()[:MAX_HYPOTHESIS_VARIABLE_LENGTH])
             elif 'confidence' in lower_line:
                 if 'high' in lower_line:
                     current_hypothesis.confidence = 'high'
@@ -1010,12 +1044,13 @@ async def negotiation_synthesis(state: NegotiationState, config: RunnableConfig)
     all_hypotheses_text = "\n\n".join(all_hypotheses)
     critiques_text = "\n\n".join(state.get("critiques", []))
     
-    # Extract convergence notes from later round messages
+    # Extract convergence notes from messages after initial proposal and critique rounds
+    # INITIAL_ROUNDS_MESSAGE_COUNT accounts for orchestrator + specialists in first 2 rounds
     messages = state.get("negotiation_messages", [])
     convergence_notes = ""
-    if len(messages) > 6:  # After initial proposal and critique rounds
+    if len(messages) > INITIAL_ROUNDS_MESSAGE_COUNT:
         convergence_notes = "\n".join([
-            str(m.content) for m in messages[6:]
+            str(m.content) for m in messages[INITIAL_ROUNDS_MESSAGE_COUNT:]
             if hasattr(m, 'content')
         ])[:5000]
     
@@ -1050,9 +1085,9 @@ async def negotiation_synthesis(state: NegotiationState, config: RunnableConfig)
             state.get("predictive_cognition_proposals", [])
         )
         
-        # Create a basic bundle from collected proposals
+        # Create a basic bundle from collected proposals, limiting to top hypotheses
         hypotheses_bundle = HypothesesBundle(
-            hypotheses=all_proposals[:8],  # Limit to 8 strongest
+            hypotheses=all_proposals[:MAX_FALLBACK_HYPOTHESES],
             predictions=[],
             open_questions=[
                 "Further research needed to validate hypotheses",
