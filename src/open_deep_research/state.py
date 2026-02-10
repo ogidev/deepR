@@ -164,7 +164,7 @@ class AgentState(MessagesState):
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
-    # Scientific negotiation outputs promoted from negotiation subgraph
+    # Scientific negotiation state promoted from negotiation subgraph
     negotiation_round: int = 0
     negotiation_max_rounds: int = 2
     negotiation_messages: Annotated[list[MessageLikeRepresentation], override_reducer] = []
