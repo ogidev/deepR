@@ -165,12 +165,12 @@ class AgentState(MessagesState):
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
     # Scientific negotiation outputs promoted from negotiation subgraph
-    negotiation_round: int
-    negotiation_max_rounds: int
+    negotiation_round: int = 0
+    negotiation_max_rounds: int = 2
     negotiation_messages: Annotated[list[MessageLikeRepresentation], override_reducer] = []
-    geneticist_proposals: List[Hypothesis]
-    systems_theorist_proposals: List[Hypothesis]
-    predictive_cognition_proposals: List[Hypothesis]
+    geneticist_proposals: List[Hypothesis] = []
+    systems_theorist_proposals: List[Hypothesis] = []
+    predictive_cognition_proposals: List[Hypothesis] = []
     critiques: Annotated[list[str], override_reducer] = []
     hypotheses_bundle: Optional[HypothesesBundle] = None
 

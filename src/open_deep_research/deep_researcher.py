@@ -75,6 +75,10 @@ configurable_model = init_chat_model(
 # Maximum length for notes context in specialist queries (token budget constraint)
 MAX_NOTES_CONTEXT_LENGTH = 10000
 
+# Negotiation-related constants
+MAX_RECALL_MESSAGES = 50  # Max messages to include in recall context (token budget constraint)
+MAX_PREVIEW_MESSAGES = 10  # Max messages to preview in negotiation round tool response
+
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
     
@@ -364,7 +368,6 @@ async def synthesize_negotiation(
         )
         
         # Create a basic bundle from collected proposals, limiting to top hypotheses
-        MAX_FALLBACK_HYPOTHESES = 8
         return HypothesesBundle(
             hypotheses=all_proposals[:MAX_FALLBACK_HYPOTHESES],
             predictions=[],
@@ -510,7 +513,7 @@ async def recall_from_negotiation(
     model = configurable_model.with_config(model_config)
     
     # Combine messages for context
-    messages_context = "\n\n".join(relevant_messages[:50])  # Limit to prevent token overflow
+    messages_context = "\n\n".join(relevant_messages[:MAX_RECALL_MESSAGES])  # Limit to prevent token overflow
     
     recall_prompt = f"""You are helping the Research Supervisor recall specific information from the scientific negotiation conversation history.
 
@@ -720,7 +723,7 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 response_content += f"Generated {num_messages} specialist contributions.\n\n"
                 
                 # Include summary of specialist messages
-                for msg in round_result.get("negotiation_messages", [])[:10]:  # Limit to first 10 for brevity
+                for msg in round_result.get("negotiation_messages", [])[:MAX_PREVIEW_MESSAGES]:  # Limit for brevity
                     if hasattr(msg, 'content'):
                         content = str(msg.content)[:300]  # Truncate long messages
                         response_content += f"{content}\n\n"
