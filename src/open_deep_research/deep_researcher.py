@@ -438,7 +438,8 @@ async def conduct_single_negotiation_round(
     # Collect results
     update_dict: Dict[str, Any] = {
         "negotiation_round": current_round,
-        "negotiation_messages": []
+        "negotiation_messages": [],
+        "critiques": []  # Initialize critiques list
     }
     
     for result in results:
@@ -451,7 +452,7 @@ async def conduct_single_negotiation_round(
         if "predictive_cognition_proposals" in result:
             update_dict["predictive_cognition_proposals"] = result["predictive_cognition_proposals"]
         if "critiques" in result:
-            update_dict.setdefault("critiques", []).extend(result["critiques"])
+            update_dict["critiques"].extend(result["critiques"])
     
     return update_dict
 
@@ -513,7 +514,9 @@ async def recall_from_negotiation(
     model = configurable_model.with_config(model_config)
     
     # Combine messages for context
-    messages_context = "\n\n".join(relevant_messages[:MAX_RECALL_MESSAGES])  # Limit to prevent token overflow
+    # Note: Older messages beyond MAX_RECALL_MESSAGES are dropped to prevent token overflow.
+    # This prioritizes recent negotiation history which is typically most relevant for recall queries.
+    messages_context = "\n\n".join(relevant_messages[:MAX_RECALL_MESSAGES])
     
     recall_prompt = f"""You are helping the Research Supervisor recall specific information from the scientific negotiation conversation history.
 
