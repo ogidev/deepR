@@ -43,10 +43,12 @@ from open_deep_research.state import (
     Hypothesis,
     HypothesesBundle,
     NegotiationState,
+    QuerySpecialist,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
     ResearchQuestion,
+    SupervisorSpecialistQuery,
     SupervisorState,
 )
 from open_deep_research.utils import (
@@ -185,6 +187,77 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     )
 
 
+async def handle_specialist_query(
+    specialist_role: str,
+    question: str,
+    state: SupervisorState,
+    config: RunnableConfig
+) -> str:
+    """Handle a direct query from supervisor to a specific specialist.
+    
+    Args:
+        specialist_role: The role of the specialist to query (geneticist, systems_theorist, predictive_cognition)
+        question: The specific question to ask the specialist
+        state: Current supervisor state with research context
+        config: Runtime configuration with model settings
+        
+    Returns:
+        String response from the specialist
+    """
+    # Step 1: Select appropriate specialist prompt
+    if specialist_role == "geneticist":
+        system_prompt_template = geneticist_system_prompt
+    elif specialist_role == "systems_theorist":
+        system_prompt_template = systems_theorist_system_prompt
+    elif specialist_role == "predictive_cognition":
+        system_prompt_template = predictive_cognition_system_prompt
+    else:
+        return f"Error: Unknown specialist role '{specialist_role}'"
+    
+    # Step 2: Prepare context with research brief and notes
+    notes = state.get("notes", [])
+    raw_notes = state.get("raw_notes", [])
+    notes_context = "\n".join(notes + raw_notes)[:10000]
+    
+    # Step 3: Format prompt for direct consultation
+    system_prompt = system_prompt_template.format(
+        research_brief=state.get("research_brief", ""),
+        notes=notes_context,
+        current_round=1,
+        max_rounds=1,
+        round_purpose="Direct consultation from Research Supervisor",
+        additional_instructions=f"""
+<Supervisor Direct Query>
+The Research Supervisor has a specific question for you outside the normal negotiation process.
+Provide a focused expert response from your specialist perspective.
+
+Question: {question}
+</Supervisor Direct Query>
+"""
+    )
+    
+    # Step 4: Configure and invoke specialist model
+    configurable = Configuration.from_runnable_config(config)
+    model_config = {
+        "model": configurable.negotiation_model or configurable.research_model,
+        "max_tokens": configurable.negotiation_max_tokens,
+        "api_key": get_api_key_for_model(
+            configurable.negotiation_model or configurable.research_model, 
+            config
+        ),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    model = configurable_model.with_config(model_config)
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=question)
+    ]
+    
+    response = await model.ainvoke(messages)
+    return str(response.content)
+
+
 async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[Literal["supervisor_tools"]]:
     """Lead research supervisor that plans research strategy and delegates to researchers.
     
@@ -208,8 +281,8 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         "tags": ["langsmith:nostream"]
     }
     
-    # Available tools: research delegation, completion signaling, and strategic thinking
-    lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
+    # Available tools: research delegation, completion signaling, specialist queries, and strategic thinking
+    lead_researcher_tools = [ConductResearch, ResearchComplete, QuerySpecialist, think_tool]
     
     # Configure model with tools, retry logic, and model settings
     research_model = (
@@ -288,6 +361,48 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             name="think_tool",
             tool_call_id=tool_call["id"]
         ))
+    
+    # Handle QuerySpecialist calls (direct specialist queries)
+    query_specialist_calls = [
+        tool_call for tool_call in most_recent_message.tool_calls 
+        if tool_call["name"] == "QuerySpecialist"
+    ]
+    
+    if query_specialist_calls:
+        for tool_call in query_specialist_calls:
+            specialist_role = tool_call["args"]["specialist"]
+            question = tool_call["args"]["question"]
+            
+            # Query the specialist directly
+            specialist_response = await handle_specialist_query(
+                specialist_role=specialist_role,
+                question=question,
+                state=state,
+                config=config
+            )
+            
+            # Record the interaction
+            all_tool_messages.append(ToolMessage(
+                content=f"[{specialist_role.replace('_', ' ').title()}] {specialist_response}",
+                name="QuerySpecialist",
+                tool_call_id=tool_call["id"]
+            ))
+            
+            # Track in state for record-keeping
+            if "specialist_queries" not in update_payload:
+                update_payload["specialist_queries"] = []
+                update_payload["specialist_responses"] = []
+            
+            update_payload["specialist_queries"].append({
+                "specialist": specialist_role,
+                "question": question,
+                "iteration": research_iterations
+            })
+            update_payload["specialist_responses"].append({
+                "specialist": specialist_role,
+                "response": specialist_response,
+                "iteration": research_iterations
+            })
     
     # Handle ConductResearch calls (research delegation)
     conduct_research_calls = [
