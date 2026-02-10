@@ -1,7 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
