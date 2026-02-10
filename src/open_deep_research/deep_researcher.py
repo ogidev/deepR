@@ -69,6 +69,9 @@ configurable_model = init_chat_model(
     configurable_fields=("model", "max_tokens", "api_key"),
 )
 
+# Maximum length for notes context in specialist queries (token budget constraint)
+MAX_NOTES_CONTEXT_LENGTH = 10000
+
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
     
@@ -217,9 +220,13 @@ async def handle_specialist_query(
     # Step 2: Prepare context with research brief and notes
     notes = state.get("notes", [])
     raw_notes = state.get("raw_notes", [])
-    notes_context = "\n".join(notes + raw_notes)[:10000]
+    notes_context = "\n".join(notes + raw_notes)[:MAX_NOTES_CONTEXT_LENGTH]
     
-    # Step 3: Format prompt for direct consultation
+    # Step 3: Sanitize question to prevent prompt injection
+    # Replace XML-like tags and special characters that could interfere with prompt structure
+    sanitized_question = question.replace("<", "&lt;").replace(">", "&gt;")
+    
+    # Step 4: Format prompt for direct consultation
     system_prompt = system_prompt_template.format(
         research_brief=state.get("research_brief", ""),
         notes=notes_context,
@@ -231,12 +238,12 @@ async def handle_specialist_query(
 The Research Supervisor has a specific question for you outside the normal negotiation process.
 Provide a focused expert response from your specialist perspective.
 
-Question: {question}
+Question: {sanitized_question}
 </Supervisor Direct Query>
 """
     )
     
-    # Step 4: Configure and invoke specialist model
+    # Step 5: Configure and invoke specialist model
     configurable = Configuration.from_runnable_config(config)
     model_config = {
         "model": configurable.negotiation_model or configurable.research_model,
