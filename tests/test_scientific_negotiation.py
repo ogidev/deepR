@@ -10,6 +10,9 @@ from open_deep_research.state import (
     AgentState,
     QuerySpecialist,
     SupervisorSpecialistQuery,
+    ConductNegotiationRound,
+    RecallFromNegotiation,
+    SynthesizeNegotiation,
 )
 from open_deep_research.configuration import Configuration
 
@@ -251,6 +254,90 @@ class TestSupervisorSpecialistQueryModel:
                 question=f"Question for {specialist}"
             )
             assert query.specialist_role == specialist
+
+
+class TestConductNegotiationRoundModel:
+    """Tests for the ConductNegotiationRound Pydantic model."""
+    
+    def test_conduct_negotiation_round_creation(self):
+        """Test creating a ConductNegotiationRound tool call."""
+        round_call = ConductNegotiationRound(
+            round_instructions="Focus on generating testable hypotheses"
+        )
+        assert round_call.round_instructions == "Focus on generating testable hypotheses"
+    
+    def test_conduct_negotiation_round_with_detailed_instructions(self):
+        """Test creating a ConductNegotiationRound with detailed instructions."""
+        detailed_instructions = """
+        This round should focus on:
+        1. Proposing 3-6 hypotheses each
+        2. Ensuring hypotheses are testable
+        3. Identifying key variables
+        """
+        round_call = ConductNegotiationRound(round_instructions=detailed_instructions)
+        assert "3-6 hypotheses" in round_call.round_instructions
+        assert "testable" in round_call.round_instructions
+
+
+class TestRecallFromNegotiationModel:
+    """Tests for the RecallFromNegotiation Pydantic model."""
+    
+    def test_recall_without_filter(self):
+        """Test creating a recall query without specialist filter."""
+        recall = RecallFromNegotiation(
+            query="What variables were identified by the specialists?"
+        )
+        assert recall.query == "What variables were identified by the specialists?"
+        assert recall.specialist_filter is None
+    
+    def test_recall_with_geneticist_filter(self):
+        """Test creating a recall query filtered to geneticist."""
+        recall = RecallFromNegotiation(
+            query="What did the geneticist say about epigenetic markers?",
+            specialist_filter="geneticist"
+        )
+        assert recall.query == "What did the geneticist say about epigenetic markers?"
+        assert recall.specialist_filter == "geneticist"
+    
+    def test_recall_with_systems_theorist_filter(self):
+        """Test creating a recall query filtered to systems theorist."""
+        recall = RecallFromNegotiation(
+            query="What feedback loops were proposed?",
+            specialist_filter="systems_theorist"
+        )
+        assert recall.specialist_filter == "systems_theorist"
+    
+    def test_recall_with_predictive_cognition_filter(self):
+        """Test creating a recall query filtered to predictive cognition scientist."""
+        recall = RecallFromNegotiation(
+            query="What Bayesian priors were discussed?",
+            specialist_filter="predictive_cognition"
+        )
+        assert recall.specialist_filter == "predictive_cognition"
+    
+    def test_recall_invalid_specialist_filter(self):
+        """Test that invalid specialist filter raises validation error."""
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            RecallFromNegotiation(
+                query="Test query",
+                specialist_filter="invalid_specialist"
+            )
+
+
+class TestSynthesizeNegotiationModel:
+    """Tests for the SynthesizeNegotiation Pydantic model."""
+    
+    def test_synthesize_with_default_instructions(self):
+        """Test creating a synthesis call with default instructions."""
+        synthesis = SynthesizeNegotiation()
+        assert synthesis.synthesis_instructions == "Synthesize all proposals and critiques into a comprehensive hypotheses bundle"
+    
+    def test_synthesize_with_custom_instructions(self):
+        """Test creating a synthesis call with custom instructions."""
+        custom_instructions = "Focus on the most testable hypotheses and generate specific predictions"
+        synthesis = SynthesizeNegotiation(synthesis_instructions=custom_instructions)
+        assert synthesis.synthesis_instructions == custom_instructions
+        assert "testable hypotheses" in synthesis.synthesis_instructions
 
 
 if __name__ == "__main__":

@@ -39,17 +39,20 @@ from open_deep_research.state import (
     AgentInputState,
     AgentState,
     ClarifyWithUser,
+    ConductNegotiationRound,
     ConductResearch,
     Hypothesis,
     HypothesesBundle,
     NegotiationState,
     QuerySpecialist,
+    RecallFromNegotiation,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
     ResearchQuestion,
     SupervisorSpecialistQuery,
     SupervisorState,
+    SynthesizeNegotiation,
 )
 from open_deep_research.utils import (
     anthropic_websearch_called,
@@ -71,6 +74,10 @@ configurable_model = init_chat_model(
 
 # Maximum length for notes context in specialist queries (token budget constraint)
 MAX_NOTES_CONTEXT_LENGTH = 10000
+
+# Negotiation-related constants
+MAX_RECALL_MESSAGES = 50  # Max messages to include in recall context (token budget constraint)
+MAX_PREVIEW_MESSAGES = 10  # Max messages to preview in negotiation round tool response
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
@@ -185,7 +192,16 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
                     SystemMessage(content=supervisor_system_prompt),
                     HumanMessage(content=response.research_brief)
                 ]
-            }
+            },
+            # Initialize negotiation state fields
+            "negotiation_round": 0,
+            "negotiation_max_rounds": configurable.negotiation_rounds,
+            "negotiation_messages": [],
+            "geneticist_proposals": [],
+            "systems_theorist_proposals": [],
+            "predictive_cognition_proposals": [],
+            "critiques": [],
+            "hypotheses_bundle": None
         }
     )
 
@@ -265,6 +281,269 @@ Question: {sanitized_question}
     return str(response.content)
 
 
+async def synthesize_negotiation(
+    state: SupervisorState,
+    config: RunnableConfig,
+    synthesis_instructions: str
+) -> HypothesesBundle:
+    """Synthesize all negotiation outputs into a structured HypothesesBundle.
+    
+    This function takes all accumulated proposals and critiques from negotiation rounds
+    and synthesizes them into a comprehensive hypotheses bundle with predictions,
+    open questions, and documented disagreements.
+    
+    Args:
+        state: Current supervisor state with all negotiation data
+        config: Runtime configuration
+        synthesis_instructions: Instructions for synthesis process
+        
+    Returns:
+        HypothesesBundle with synthesized hypotheses and predictions
+    """
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Use negotiation model or fall back to research model
+    model_name = configurable.negotiation_model or configurable.research_model
+    model_config = {
+        "model": model_name,
+        "max_tokens": configurable.negotiation_max_tokens,
+        "api_key": get_api_key_for_model(model_name, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    # Gather all proposals
+    all_hypotheses = []
+    for h in state.get("geneticist_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Geneticist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in state.get("systems_theorist_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Systems Theorist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in state.get("predictive_cognition_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Predictive Cognition) {h.statement}\n  Rationale: {h.rationale}")
+    
+    all_hypotheses_text = "\n\n".join(all_hypotheses) if all_hypotheses else "No hypotheses proposed yet"
+    critiques_text = "\n\n".join(state.get("critiques", [])) if state.get("critiques") else "No critiques provided yet"
+    
+    # Extract convergence notes from negotiation messages
+    messages = state.get("negotiation_messages", [])
+    convergence_notes = ""
+    if messages:
+        # Get recent messages (skip initial orchestrator messages)
+        recent_messages = [
+            str(m.content) for m in messages[-20:] if hasattr(m, 'content')
+        ]
+        convergence_notes = "\n".join(recent_messages)[:5000]
+    
+    # Prepare synthesis prompt
+    synthesis_prompt = negotiation_synthesis_prompt.format(
+        research_brief=state.get("research_brief", ""),
+        all_hypotheses=all_hypotheses_text,
+        all_critiques=critiques_text,
+        convergence_notes=convergence_notes
+    )
+    
+    # Add custom synthesis instructions
+    full_prompt = f"{synthesis_prompt}\n\nAdditional Synthesis Instructions:\n{synthesis_instructions}"
+    
+    model = configurable_model.with_config(model_config)
+    
+    try:
+        # Try to get structured output
+        structured_model = model.with_structured_output(HypothesesBundle).with_retry(
+            stop_after_attempt=configurable.max_structured_output_retries
+        )
+        
+        response = await structured_model.ainvoke([
+            SystemMessage(content="You are synthesizing scientific negotiation outputs."),
+            HumanMessage(content=full_prompt)
+        ])
+        
+        return response
+        
+    except Exception:
+        # Fall back to manual bundle construction if structured output fails
+        all_proposals = (
+            state.get("geneticist_proposals", []) +
+            state.get("systems_theorist_proposals", []) +
+            state.get("predictive_cognition_proposals", [])
+        )
+        
+        # Create a basic bundle from collected proposals, limiting to top hypotheses
+        return HypothesesBundle(
+            hypotheses=all_proposals[:MAX_FALLBACK_HYPOTHESES],
+            predictions=[],
+            open_questions=[
+                "Further research needed to validate hypotheses",
+                "Cross-disciplinary experiments recommended"
+            ],
+            disagreements=[]
+        )
+
+
+async def conduct_single_negotiation_round(
+    state: SupervisorState, 
+    config: RunnableConfig, 
+    round_instructions: str
+) -> Dict[str, Any]:
+    """Execute a single round of negotiation (orchestrator + specialists).
+    
+    This function runs one iteration of the negotiation cycle where:
+    1. The orchestrator prepares the round
+    2. All three specialists contribute in parallel
+    3. Results are collected and returned to the supervisor
+    
+    Args:
+        state: Current supervisor state with negotiation context
+        config: Runtime configuration
+        round_instructions: High-level instructions for this specific round
+        
+    Returns:
+        Dictionary with updated negotiation state fields
+    """
+    configurable = Configuration.from_runnable_config(config)
+    current_round = state.get("negotiation_round", 0) + 1
+    max_rounds = state.get("negotiation_max_rounds", 2)
+    
+    # Create NegotiationState from SupervisorState
+    negotiation_state: NegotiationState = {
+        "research_brief": state.get("research_brief", ""),
+        "notes": state.get("notes", []),
+        "raw_notes": state.get("raw_notes", []),
+        "current_round": current_round,
+        "max_rounds": max_rounds,
+        "geneticist_proposals": state.get("geneticist_proposals", []),
+        "systems_theorist_proposals": state.get("systems_theorist_proposals", []),
+        "predictive_cognition_proposals": state.get("predictive_cognition_proposals", []),
+        "critiques": state.get("critiques", []),
+        "hypotheses_bundle": state.get("hypotheses_bundle"),
+        "negotiation_messages": state.get("negotiation_messages", [])
+    }
+    
+    # Run orchestrator
+    orchestrator_result = await negotiation_orchestrator(negotiation_state, config)
+    negotiation_state["negotiation_messages"] = negotiation_state["negotiation_messages"] + orchestrator_result.get("negotiation_messages", [])
+    
+    # Add custom round instructions to messages
+    custom_instruction_message = AIMessage(
+        content=f"[Supervisor Instructions for Round {current_round}] {round_instructions}"
+    )
+    negotiation_state["negotiation_messages"].append(custom_instruction_message)
+    
+    # Run all three specialists in parallel
+    geneticist_task = geneticist_agent(negotiation_state, config)
+    systems_task = systems_theorist_agent(negotiation_state, config)
+    predictive_task = predictive_cognition_agent(negotiation_state, config)
+    
+    results = await asyncio.gather(geneticist_task, systems_task, predictive_task)
+    
+    # Collect results
+    update_dict: Dict[str, Any] = {
+        "negotiation_round": current_round,
+        "negotiation_messages": [],
+        "critiques": []  # Initialize critiques list
+    }
+    
+    for result in results:
+        if "negotiation_messages" in result:
+            update_dict["negotiation_messages"].extend(result["negotiation_messages"])
+        if "geneticist_proposals" in result:
+            update_dict["geneticist_proposals"] = result["geneticist_proposals"]
+        if "systems_theorist_proposals" in result:
+            update_dict["systems_theorist_proposals"] = result["systems_theorist_proposals"]
+        if "predictive_cognition_proposals" in result:
+            update_dict["predictive_cognition_proposals"] = result["predictive_cognition_proposals"]
+        if "critiques" in result:
+            update_dict["critiques"].extend(result["critiques"])
+    
+    return update_dict
+
+
+async def recall_from_negotiation(
+    state: SupervisorState,
+    config: RunnableConfig,
+    query: str,
+    specialist_filter: Optional[str] = None
+) -> str:
+    """Search negotiation conversation history for specific information.
+    
+    This implements RAG-like recall over the accumulated negotiation_messages,
+    optionally filtered by specialist role.
+    
+    Args:
+        state: Current supervisor state with negotiation history
+        config: Runtime configuration
+        query: What to search for in the conversation history
+        specialist_filter: Optional specialist role to filter by
+        
+    Returns:
+        Formatted string with relevant excerpts from negotiation history
+    """
+    negotiation_messages = state.get("negotiation_messages", [])
+    
+    if not negotiation_messages:
+        return "No negotiation history available yet. Start negotiation rounds first."
+    
+    # Filter messages by specialist if requested
+    relevant_messages = []
+    for msg in negotiation_messages:
+        if not hasattr(msg, 'content'):
+            continue
+        
+        content = str(msg.content)
+        
+        # Apply specialist filter
+        if specialist_filter:
+            specialist_name = specialist_filter.replace("_", " ").title()
+            if f"[{specialist_name}" not in content and f"[{specialist_filter}" not in content.lower():
+                continue
+        
+        relevant_messages.append(content)
+    
+    if not relevant_messages:
+        filter_msg = f" from {specialist_filter}" if specialist_filter else ""
+        return f"No relevant messages found{filter_msg} in negotiation history."
+    
+    # Use LLM to extract relevant information based on query
+    configurable = Configuration.from_runnable_config(config)
+    model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    model = configurable_model.with_config(model_config)
+    
+    # Combine messages for context
+    # Note: Older messages beyond MAX_RECALL_MESSAGES are dropped to prevent token overflow.
+    # This prioritizes recent negotiation history which is typically most relevant for recall queries.
+    messages_context = "\n\n".join(relevant_messages[:MAX_RECALL_MESSAGES])
+    
+    recall_prompt = f"""You are helping the Research Supervisor recall specific information from the scientific negotiation conversation history.
+
+<Query>
+{query}
+</Query>
+
+<Negotiation History>
+{messages_context}
+</Negotiation History>
+
+Instructions:
+1. Extract and summarize information relevant to the query
+2. Cite which specialist(s) provided the information
+3. Keep the response focused and concise
+4. If the information isn't in the history, clearly state that
+
+Provide your response:"""
+    
+    response = await model.ainvoke([
+        SystemMessage(content="You are a research assistant helping to recall information from conversation history."),
+        HumanMessage(content=recall_prompt)
+    ])
+    
+    return str(response.content)
+
+
 async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[Literal["supervisor_tools"]]:
     """Lead research supervisor that plans research strategy and delegates to researchers.
     
@@ -288,8 +567,8 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         "tags": ["langsmith:nostream"]
     }
     
-    # Available tools: research delegation, completion signaling, specialist queries, and strategic thinking
-    lead_researcher_tools = [ConductResearch, ResearchComplete, QuerySpecialist, think_tool]
+    # Available tools: research delegation, completion signaling, specialist queries, negotiation control, and strategic thinking
+    lead_researcher_tools = [ConductResearch, ResearchComplete, QuerySpecialist, ConductNegotiationRound, RecallFromNegotiation, SynthesizeNegotiation, think_tool]
     
     # Configure model with tools, retry logic, and model settings
     research_model = (
@@ -347,7 +626,16 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             goto=END,
             update={
                 "notes": get_notes_from_tool_calls(supervisor_messages),
-                "research_brief": state.get("research_brief", "")
+                "research_brief": state.get("research_brief", ""),
+                # Pass negotiation state to AgentState
+                "negotiation_round": state.get("negotiation_round", 0),
+                "negotiation_max_rounds": state.get("negotiation_max_rounds", 2),
+                "negotiation_messages": state.get("negotiation_messages", []),
+                "geneticist_proposals": state.get("geneticist_proposals", []),
+                "systems_theorist_proposals": state.get("systems_theorist_proposals", []),
+                "predictive_cognition_proposals": state.get("predictive_cognition_proposals", []),
+                "critiques": state.get("critiques", []),
+                "hypotheses_bundle": state.get("hypotheses_bundle")
             }
         )
     
@@ -411,6 +699,141 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 "iteration": research_iterations
             })
     
+    # Handle ConductNegotiationRound calls (negotiation round execution)
+    conduct_negotiation_calls = [
+        tool_call for tool_call in most_recent_message.tool_calls
+        if tool_call["name"] == "ConductNegotiationRound"
+    ]
+    
+    if conduct_negotiation_calls:
+        for tool_call in conduct_negotiation_calls:
+            round_instructions = tool_call["args"]["round_instructions"]
+            
+            try:
+                # Execute single negotiation round
+                round_result = await conduct_single_negotiation_round(
+                    state=state,
+                    config=config,
+                    round_instructions=round_instructions
+                )
+                
+                # Format response message
+                current_round = round_result.get("negotiation_round", state.get("negotiation_round", 0))
+                num_messages = len(round_result.get("negotiation_messages", []))
+                
+                response_content = f"[Negotiation Round {current_round} Complete]\n"
+                response_content += f"Instructions: {round_instructions}\n"
+                response_content += f"Generated {num_messages} specialist contributions.\n\n"
+                
+                # Include summary of specialist messages
+                for msg in round_result.get("negotiation_messages", [])[:MAX_PREVIEW_MESSAGES]:  # Limit for brevity
+                    if hasattr(msg, 'content'):
+                        content = str(msg.content)[:300]  # Truncate long messages
+                        response_content += f"{content}\n\n"
+                
+                all_tool_messages.append(ToolMessage(
+                    content=response_content,
+                    name="ConductNegotiationRound",
+                    tool_call_id=tool_call["id"]
+                ))
+                
+                # Update state with negotiation results
+                for key in ["negotiation_round", "negotiation_messages", "geneticist_proposals", 
+                           "systems_theorist_proposals", "predictive_cognition_proposals", "critiques"]:
+                    if key in round_result:
+                        update_payload[key] = round_result[key]
+                
+            except Exception as e:
+                error_msg = f"Error conducting negotiation round: {str(e)}"
+                all_tool_messages.append(ToolMessage(
+                    content=error_msg,
+                    name="ConductNegotiationRound",
+                    tool_call_id=tool_call["id"]
+                ))
+    
+    # Handle RecallFromNegotiation calls (conversation history recall)
+    recall_calls = [
+        tool_call for tool_call in most_recent_message.tool_calls
+        if tool_call["name"] == "RecallFromNegotiation"
+    ]
+    
+    if recall_calls:
+        for tool_call in recall_calls:
+            query = tool_call["args"]["query"]
+            specialist_filter = tool_call["args"].get("specialist_filter")
+            
+            try:
+                # Execute recall
+                recall_result = await recall_from_negotiation(
+                    state=state,
+                    config=config,
+                    query=query,
+                    specialist_filter=specialist_filter
+                )
+                
+                filter_text = f" (filtered to {specialist_filter})" if specialist_filter else ""
+                response_content = f"[Recall Result{filter_text}]\nQuery: {query}\n\n{recall_result}"
+                
+                all_tool_messages.append(ToolMessage(
+                    content=response_content,
+                    name="RecallFromNegotiation",
+                    tool_call_id=tool_call["id"]
+                ))
+                
+            except Exception as e:
+                error_msg = f"Error recalling from negotiation: {str(e)}"
+                all_tool_messages.append(ToolMessage(
+                    content=error_msg,
+                    name="RecallFromNegotiation",
+                    tool_call_id=tool_call["id"]
+                ))
+    
+    # Handle SynthesizeNegotiation calls (create final hypotheses bundle)
+    synthesize_calls = [
+        tool_call for tool_call in most_recent_message.tool_calls
+        if tool_call["name"] == "SynthesizeNegotiation"
+    ]
+    
+    if synthesize_calls:
+        for tool_call in synthesize_calls:
+            synthesis_instructions = tool_call["args"].get("synthesis_instructions", 
+                "Synthesize all proposals and critiques into a comprehensive hypotheses bundle")
+            
+            try:
+                # Execute synthesis
+                hypotheses_bundle = await synthesize_negotiation(
+                    state=state,
+                    config=config,
+                    synthesis_instructions=synthesis_instructions
+                )
+                
+                # Format response
+                num_hypotheses = len(hypotheses_bundle.hypotheses)
+                num_predictions = len(hypotheses_bundle.predictions)
+                num_disagreements = len(hypotheses_bundle.disagreements)
+                
+                response_content = f"[Synthesis Complete]\n"
+                response_content += f"Generated {num_hypotheses} hypotheses, {num_predictions} predictions, "
+                response_content += f"{num_disagreements} documented disagreements.\n\n"
+                response_content += f"Hypotheses: {', '.join([h.id for h in hypotheses_bundle.hypotheses])}\n"
+                
+                all_tool_messages.append(ToolMessage(
+                    content=response_content,
+                    name="SynthesizeNegotiation",
+                    tool_call_id=tool_call["id"]
+                ))
+                
+                # Update state with synthesized bundle
+                update_payload["hypotheses_bundle"] = hypotheses_bundle
+                
+            except Exception as e:
+                error_msg = f"Error synthesizing negotiation: {str(e)}"
+                all_tool_messages.append(ToolMessage(
+                    content=error_msg,
+                    name="SynthesizeNegotiation",
+                    tool_call_id=tool_call["id"]
+                ))
+    
     # Handle ConductResearch calls (research delegation)
     conduct_research_calls = [
         tool_call for tool_call in most_recent_message.tool_calls 
@@ -469,7 +892,16 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                     goto=END,
                     update={
                         "notes": get_notes_from_tool_calls(supervisor_messages),
-                        "research_brief": state.get("research_brief", "")
+                        "research_brief": state.get("research_brief", ""),
+                        # Pass negotiation state to AgentState
+                        "negotiation_round": state.get("negotiation_round", 0),
+                        "negotiation_max_rounds": state.get("negotiation_max_rounds", 2),
+                        "negotiation_messages": state.get("negotiation_messages", []),
+                        "geneticist_proposals": state.get("geneticist_proposals", []),
+                        "systems_theorist_proposals": state.get("systems_theorist_proposals", []),
+                        "predictive_cognition_proposals": state.get("predictive_cognition_proposals", []),
+                        "critiques": state.get("critiques", []),
+                        "hypotheses_bundle": state.get("hypotheses_bundle")
                     }
                 )
     
@@ -1513,13 +1945,12 @@ deep_researcher_builder = StateGraph(
 # Add main workflow nodes for the complete research process
 deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
-deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
-deep_researcher_builder.add_node("scientific_negotiation", scientific_negotiation) # Scientific negotiation phase
+deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase (includes negotiation)
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
 
 # Define main workflow edges for sequential execution
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
-deep_researcher_builder.add_edge("research_supervisor", "scientific_negotiation")  # Research to negotiation
+deep_researcher_builder.add_edge("research_supervisor", "final_report_generation")  # Research to report (negotiation handled via supervisor tools)
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
 # Compile the complete deep researcher workflow
