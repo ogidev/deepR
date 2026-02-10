@@ -62,6 +62,46 @@ class SupervisorSpecialistQuery(BaseModel):
     context: str = Field(default="", description="Additional context for the query")
 
 
+class HumanDirective(BaseModel):
+    """Structured directive from the human supervisor.
+
+    The human user acts as the supervisor and can address both the
+    orchestrator (for research tasks and negotiation rounds) and the
+    specialists directly.
+    """
+
+    action: Literal[
+        "conduct_research",
+        "query_specialist",
+        "conduct_negotiation_round",
+        "recall_from_negotiation",
+        "synthesize_negotiation",
+        "generate_report",
+        "provide_feedback",
+    ] = Field(
+        description=(
+            "The action to take. 'conduct_research' delegates a research task, "
+            "'query_specialist' asks a specialist directly, "
+            "'conduct_negotiation_round' runs a negotiation round, "
+            "'recall_from_negotiation' queries negotiation history, "
+            "'synthesize_negotiation' creates the final hypotheses bundle, "
+            "'generate_report' produces the final report, "
+            "'provide_feedback' sends guidance to the orchestrator."
+        ),
+    )
+    content: str = Field(
+        description=(
+            "The content of the directive — a research topic, question for a "
+            "specialist, negotiation round instructions, recall query, "
+            "synthesis instructions, or feedback text."
+        ),
+    )
+    specialist: Literal["geneticist", "systems_theorist", "predictive_cognition"] | None = Field(
+        default=None,
+        description="Which specialist to query (required for 'query_specialist' and optional for 'recall_from_negotiation').",
+    )
+
+
 ###################
 # Scientific Negotiation Models
 ###################
@@ -173,6 +213,8 @@ class AgentState(MessagesState):
     predictive_cognition_proposals: List[Hypothesis] = []
     critiques: Annotated[list[str], override_reducer] = []
     hypotheses_bundle: Optional[HypothesesBundle] = None
+    # Human supervisor loop tracking
+    human_supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer] = []
 
 class SupervisorState(TypedDict):
     """State for the supervisor that manages research tasks."""

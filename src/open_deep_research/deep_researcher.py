@@ -14,7 +14,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from open_deep_research.configuration import (
     Configuration,
@@ -25,6 +25,8 @@ from open_deep_research.prompts import (
     compress_research_system_prompt,
     final_report_generation_prompt,
     geneticist_system_prompt,
+    human_directive_classification_prompt,
+    human_supervisor_status_prompt,
     lead_researcher_prompt,
     negotiation_synthesis_prompt,
     predictive_cognition_system_prompt,
@@ -41,6 +43,7 @@ from open_deep_research.state import (
     ClarifyWithUser,
     ConductNegotiationRound,
     ConductResearch,
+    HumanDirective,
     Hypothesis,
     HypothesesBundle,
     NegotiationState,
@@ -1934,6 +1937,352 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         **cleared_state
     }
 
+
+async def _classify_human_directive(
+    human_message: str,
+    config: RunnableConfig
+) -> HumanDirective:
+    """Classify a free-form human message into a structured HumanDirective.
+
+    Uses an LLM to interpret the human supervisor's instruction and map it
+    to a structured action that the system can execute.
+
+    Args:
+        human_message: Free-form instruction from the human supervisor
+        config: Runtime configuration with model settings
+
+    Returns:
+        HumanDirective with classified action, content, and optional specialist
+    """
+    configurable = Configuration.from_runnable_config(config)
+    model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+        "tags": ["langsmith:nostream"],
+    }
+
+    classification_model = (
+        configurable_model
+        .with_structured_output(HumanDirective)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(model_config)
+    )
+
+    prompt = human_directive_classification_prompt.format(
+        human_message=human_message,
+    )
+    return await classification_model.ainvoke([HumanMessage(content=prompt)])
+
+
+def _build_status_message(state: AgentState) -> str:
+    """Build a research status summary for the human supervisor.
+
+    Args:
+        state: Current agent state with research data
+
+    Returns:
+        Formatted status string presented to the human
+    """
+    notes = state.get("notes", [])
+    raw_notes = state.get("raw_notes", [])
+    all_notes = notes + raw_notes
+
+    if all_notes:
+        findings_summary = "\n".join(
+            f"- {note[:200]}..." if len(note) > 200 else f"- {note}"
+            for note in all_notes[:10]
+        )
+        if len(all_notes) > 10:
+            findings_summary += f"\n... and {len(all_notes) - 10} more notes"
+    else:
+        findings_summary = "No research notes collected yet."
+
+    has_bundle = "Yes" if state.get("hypotheses_bundle") else "No"
+
+    return human_supervisor_status_prompt.format(
+        research_brief=state.get("research_brief", "Not yet defined"),
+        num_notes=len(all_notes),
+        findings_summary=findings_summary,
+        negotiation_round=state.get("negotiation_round", 0),
+        negotiation_max_rounds=state.get("negotiation_max_rounds", 2),
+        num_geneticist_proposals=len(state.get("geneticist_proposals", [])),
+        num_systems_theorist_proposals=len(state.get("systems_theorist_proposals", [])),
+        num_predictive_cognition_proposals=len(state.get("predictive_cognition_proposals", [])),
+        num_critiques=len(state.get("critiques", [])),
+        has_hypotheses_bundle=has_bundle,
+    )
+
+
+async def human_supervisor(
+    state: AgentState, config: RunnableConfig,
+) -> Command[Literal["process_human_directive", "final_report_generation"]]:
+    """Present research status and wait for human supervisor input.
+
+    This node uses ``interrupt()`` to pause execution and present the current
+    research state to the human user via the LangGraph Studio UI.  The human
+    can then provide a directive that is routed to the appropriate handler.
+
+    Args:
+        state: Current agent state
+        config: Runtime configuration
+
+    Returns:
+        Command routing to process_human_directive or final_report_generation
+    """
+    status_message = _build_status_message(state)
+
+    # Interrupt and wait for human input, showing the status message
+    human_input = interrupt(status_message)
+
+    # If the human provides input, classify it and route accordingly
+    if isinstance(human_input, str) and human_input.strip():
+        directive = await _classify_human_directive(human_input, config)
+
+        # If the human asks to generate the report, go directly
+        if directive.action == "generate_report":
+            return Command(
+                goto="final_report_generation",
+                update={
+                    "messages": [AIMessage(content="Generating final report as requested.")],
+                    "human_supervisor_messages": [
+                        HumanMessage(content=human_input),
+                        AIMessage(content="Proceeding to final report generation."),
+                    ],
+                },
+            )
+
+        # Otherwise route to directive processing
+        return Command(
+            goto="process_human_directive",
+            update={
+                "human_supervisor_messages": [
+                    HumanMessage(content=human_input),
+                    AIMessage(
+                        content=f"Processing your directive: {directive.action} — {directive.content}"
+                    ),
+                ],
+                # Store the directive details in messages for the processor
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            f"[Human Supervisor Directive]\n"
+                            f"Action: {directive.action}\n"
+                            f"Content: {directive.content}\n"
+                            f"Specialist: {directive.specialist or 'N/A'}"
+                        )
+                    ),
+                ],
+            },
+        )
+
+    # Empty input — generate report by default
+    return Command(
+        goto="final_report_generation",
+        update={
+            "messages": [AIMessage(content="No further instructions received. Generating final report.")],
+        },
+    )
+
+
+async def process_human_directive(
+    state: AgentState, config: RunnableConfig,
+) -> Command[Literal["human_supervisor"]]:
+    """Execute the action requested by the human supervisor.
+
+    Parses the most recent human directive from state messages and executes
+    the corresponding action (research, specialist query, negotiation, etc.).
+    Results are added to state and control returns to the human supervisor.
+
+    Args:
+        state: Current agent state containing the human directive
+        config: Runtime configuration
+
+    Returns:
+        Command to loop back to human_supervisor with results
+    """
+    # Extract the most recent directive from messages
+    messages = state.get("messages", [])
+    directive_message = None
+    for msg in reversed(messages):
+        if hasattr(msg, "content") and "[Human Supervisor Directive]" in str(msg.content):
+            directive_message = str(msg.content)
+            break
+
+    if not directive_message:
+        return Command(
+            goto="human_supervisor",
+            update={
+                "messages": [AIMessage(content="No directive found. Please provide an instruction.")],
+            },
+        )
+
+    # Parse the directive
+    lines = directive_message.split("\n")
+    action = ""
+    content = ""
+    specialist = None
+    for line in lines:
+        if line.startswith("Action: "):
+            action = line[len("Action: "):]
+        elif line.startswith("Content: "):
+            content = line[len("Content: "):]
+        elif line.startswith("Specialist: "):
+            spec = line[len("Specialist: "):]
+            if spec != "N/A":
+                specialist = spec
+
+    update: Dict[str, Any] = {}
+    result_message = ""
+
+    # Build a SupervisorState-like dict for reusing existing helper functions
+    supervisor_state: SupervisorState = {
+        "supervisor_messages": state.get("supervisor_messages", []),
+        "research_brief": state.get("research_brief", ""),
+        "notes": state.get("notes", []),
+        "raw_notes": state.get("raw_notes", []),
+        "research_iterations": 0,
+        "specialist_queries": [],
+        "specialist_responses": [],
+        "negotiation_round": state.get("negotiation_round", 0),
+        "negotiation_max_rounds": state.get("negotiation_max_rounds", 2),
+        "negotiation_messages": state.get("negotiation_messages", []),
+        "geneticist_proposals": state.get("geneticist_proposals", []),
+        "systems_theorist_proposals": state.get("systems_theorist_proposals", []),
+        "predictive_cognition_proposals": state.get("predictive_cognition_proposals", []),
+        "critiques": state.get("critiques", []),
+        "hypotheses_bundle": state.get("hypotheses_bundle"),
+    }
+
+    if action == "conduct_research":
+        # Delegate research to a sub-researcher
+        try:
+            tool_result = await researcher_subgraph.ainvoke(
+                {
+                    "researcher_messages": [HumanMessage(content=content)],
+                    "research_topic": content,
+                },
+                config,
+            )
+            compressed = tool_result.get(
+                "compressed_research",
+                "No results returned from research.",
+            )
+            raw = tool_result.get("raw_notes", [])
+            result_message = f"**Research Results:**\n{compressed}"
+            update["notes"] = [compressed]
+            if raw:
+                update["raw_notes"] = raw
+        except Exception as e:
+            result_message = f"Error conducting research: {e}"
+
+    elif action == "query_specialist":
+        if not specialist:
+            result_message = (
+                "Please specify which specialist to query "
+                "(geneticist, systems_theorist, or predictive_cognition)."
+            )
+        else:
+            try:
+                response = await handle_specialist_query(
+                    specialist_role=specialist,
+                    question=content,
+                    state=supervisor_state,
+                    config=config,
+                )
+                specialist_name = specialist.replace("_", " ").title()
+                result_message = f"**{specialist_name} Response:**\n{response}"
+            except Exception as e:
+                result_message = f"Error querying specialist: {e}"
+
+    elif action == "conduct_negotiation_round":
+        try:
+            round_result = await conduct_single_negotiation_round(
+                state=supervisor_state,
+                config=config,
+                round_instructions=content,
+            )
+            current_round = round_result.get(
+                "negotiation_round",
+                state.get("negotiation_round", 0),
+            )
+            num_messages = len(round_result.get("negotiation_messages", []))
+            result_message = (
+                f"**Negotiation Round {current_round} Complete**\n"
+                f"Instructions: {content}\n"
+                f"Generated {num_messages} specialist contributions.\n\n"
+            )
+            for msg in round_result.get("negotiation_messages", [])[:MAX_PREVIEW_MESSAGES]:
+                if hasattr(msg, "content"):
+                    msg_content = str(msg.content)[:300]
+                    result_message += f"{msg_content}\n\n"
+
+            for key in [
+                "negotiation_round", "negotiation_messages",
+                "geneticist_proposals", "systems_theorist_proposals",
+                "predictive_cognition_proposals", "critiques",
+            ]:
+                if key in round_result:
+                    update[key] = round_result[key]
+        except Exception as e:
+            result_message = f"Error conducting negotiation round: {e}"
+
+    elif action == "recall_from_negotiation":
+        try:
+            recall_result = await recall_from_negotiation(
+                state=supervisor_state,
+                config=config,
+                query=content,
+                specialist_filter=specialist,
+            )
+            filter_text = f" (filtered to {specialist})" if specialist else ""
+            result_message = (
+                f"**Recall Result{filter_text}:**\n"
+                f"Query: {content}\n\n{recall_result}"
+            )
+        except Exception as e:
+            result_message = f"Error recalling from negotiation: {e}"
+
+    elif action == "synthesize_negotiation":
+        try:
+            hypotheses_bundle = await synthesize_negotiation(
+                state=supervisor_state,
+                config=config,
+                synthesis_instructions=content,
+            )
+            num_h = len(hypotheses_bundle.hypotheses)
+            num_p = len(hypotheses_bundle.predictions)
+            num_d = len(hypotheses_bundle.disagreements)
+            result_message = (
+                f"**Synthesis Complete**\n"
+                f"Generated {num_h} hypotheses, {num_p} predictions, "
+                f"{num_d} documented disagreements.\n"
+            )
+            if hypotheses_bundle.hypotheses:
+                result_message += "Hypotheses: " + ", ".join(
+                    h.id for h in hypotheses_bundle.hypotheses
+                ) + "\n"
+            update["hypotheses_bundle"] = hypotheses_bundle
+        except Exception as e:
+            result_message = f"Error synthesizing negotiation: {e}"
+
+    elif action == "provide_feedback":
+        # Feedback is stored in messages for context
+        result_message = (
+            f"**Feedback noted.** Your guidance has been recorded:\n{content}"
+        )
+
+    else:
+        result_message = (
+            f"Unknown action '{action}'. Please provide a valid instruction."
+        )
+
+    update["messages"] = [AIMessage(content=result_message)]
+    update["human_supervisor_messages"] = [AIMessage(content=result_message)]
+
+    return Command(goto="human_supervisor", update=update)
+
+
 # Main Deep Researcher Graph Construction
 # Creates the complete deep research workflow from user input to final report
 deep_researcher_builder = StateGraph(
@@ -1945,12 +2294,14 @@ deep_researcher_builder = StateGraph(
 # Add main workflow nodes for the complete research process
 deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
-deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase (includes negotiation)
+deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Initial automated research phase
+deep_researcher_builder.add_node("human_supervisor", human_supervisor)             # Human-in-the-loop supervisor
+deep_researcher_builder.add_node("process_human_directive", process_human_directive)  # Execute human directives
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
 
-# Define main workflow edges for sequential execution
+# Define main workflow edges
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
-deep_researcher_builder.add_edge("research_supervisor", "final_report_generation")  # Research to report (negotiation handled via supervisor tools)
+deep_researcher_builder.add_edge("research_supervisor", "human_supervisor")        # After initial research, hand control to human
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
 # Compile the complete deep researcher workflow

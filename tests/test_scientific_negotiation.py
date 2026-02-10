@@ -340,5 +340,164 @@ class TestSynthesizeNegotiationModel:
         assert "testable hypotheses" in synthesis.synthesis_instructions
 
 
+class TestHumanDirectiveModel:
+    """Tests for the HumanDirective Pydantic model."""
+
+    def test_conduct_research_directive(self):
+        """Test creating a conduct_research directive."""
+        from open_deep_research.state import HumanDirective
+        directive = HumanDirective(
+            action="conduct_research",
+            content="Research the role of epigenetic markers in stress response",
+        )
+        assert directive.action == "conduct_research"
+        assert "epigenetic" in directive.content
+        assert directive.specialist is None
+
+    def test_query_specialist_directive(self):
+        """Test creating a query_specialist directive with specialist."""
+        from open_deep_research.state import HumanDirective
+        directive = HumanDirective(
+            action="query_specialist",
+            content="What genes are involved in circadian rhythm regulation?",
+            specialist="geneticist",
+        )
+        assert directive.action == "query_specialist"
+        assert directive.specialist == "geneticist"
+
+    def test_generate_report_directive(self):
+        """Test creating a generate_report directive."""
+        from open_deep_research.state import HumanDirective
+        directive = HumanDirective(
+            action="generate_report",
+            content="Generate the final report",
+        )
+        assert directive.action == "generate_report"
+
+    def test_provide_feedback_directive(self):
+        """Test creating a provide_feedback directive."""
+        from open_deep_research.state import HumanDirective
+        directive = HumanDirective(
+            action="provide_feedback",
+            content="Focus more on the genetic aspects of the research",
+        )
+        assert directive.action == "provide_feedback"
+
+    def test_all_valid_actions(self):
+        """Test that all valid actions are accepted."""
+        from open_deep_research.state import HumanDirective
+        valid_actions = [
+            "conduct_research",
+            "query_specialist",
+            "conduct_negotiation_round",
+            "recall_from_negotiation",
+            "synthesize_negotiation",
+            "generate_report",
+            "provide_feedback",
+        ]
+        for action in valid_actions:
+            directive = HumanDirective(action=action, content=f"Test {action}")
+            assert directive.action == action
+
+    def test_invalid_action(self):
+        """Test that invalid action raises validation error."""
+        from open_deep_research.state import HumanDirective
+        with pytest.raises(Exception):
+            HumanDirective(action="invalid_action", content="Test")
+
+    def test_all_valid_specialists(self):
+        """Test that all valid specialist values are accepted."""
+        from open_deep_research.state import HumanDirective
+        for specialist in ["geneticist", "systems_theorist", "predictive_cognition"]:
+            directive = HumanDirective(
+                action="query_specialist",
+                content="Test question",
+                specialist=specialist,
+            )
+            assert directive.specialist == specialist
+
+    def test_invalid_specialist(self):
+        """Test that invalid specialist raises validation error."""
+        from open_deep_research.state import HumanDirective
+        with pytest.raises(Exception):
+            HumanDirective(
+                action="query_specialist",
+                content="Test",
+                specialist="invalid_specialist",
+            )
+
+
+class TestBuildStatusMessage:
+    """Tests for the _build_status_message helper function."""
+
+    def test_status_message_with_empty_state(self):
+        """Test status message with minimal state."""
+        from open_deep_research.deep_researcher import _build_status_message
+        state = {
+            "messages": [],
+            "research_brief": "Test brief",
+            "notes": [],
+            "raw_notes": [],
+            "negotiation_round": 0,
+            "negotiation_max_rounds": 2,
+            "geneticist_proposals": [],
+            "systems_theorist_proposals": [],
+            "predictive_cognition_proposals": [],
+            "critiques": [],
+            "hypotheses_bundle": None,
+        }
+        msg = _build_status_message(state)
+        assert "Test brief" in msg
+        assert "No research notes collected yet" in msg
+        assert "human supervisor" in msg.lower()
+
+    def test_status_message_with_notes(self):
+        """Test status message with research notes."""
+        from open_deep_research.deep_researcher import _build_status_message
+        state = {
+            "messages": [],
+            "research_brief": "Research about genes",
+            "notes": ["Finding 1: Gene X is important", "Finding 2: Gene Y is related"],
+            "raw_notes": [],
+            "negotiation_round": 1,
+            "negotiation_max_rounds": 3,
+            "geneticist_proposals": [],
+            "systems_theorist_proposals": [],
+            "predictive_cognition_proposals": [],
+            "critiques": [],
+            "hypotheses_bundle": None,
+        }
+        msg = _build_status_message(state)
+        assert "Research about genes" in msg
+        assert "2 notes" in msg
+        assert "Gene X" in msg
+
+
+class TestGraphStructure:
+    """Tests for the human supervisor graph structure."""
+
+    def test_graph_has_human_supervisor_node(self):
+        """Test that the compiled graph includes the human_supervisor node."""
+        from open_deep_research.deep_researcher import deep_researcher
+        assert "human_supervisor" in deep_researcher.nodes
+
+    def test_graph_has_process_human_directive_node(self):
+        """Test that the compiled graph includes the process_human_directive node."""
+        from open_deep_research.deep_researcher import deep_researcher
+        assert "process_human_directive" in deep_researcher.nodes
+
+    def test_graph_preserves_existing_nodes(self):
+        """Test that all original nodes are still present."""
+        from open_deep_research.deep_researcher import deep_researcher
+        expected_nodes = [
+            "clarify_with_user",
+            "write_research_brief",
+            "research_supervisor",
+            "final_report_generation",
+        ]
+        for node in expected_nodes:
+            assert node in deep_researcher.nodes
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

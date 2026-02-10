@@ -705,3 +705,61 @@ specialist_convergence_instructions = """Based on all proposals and critiques, w
 
 Proposals and critiques to consider:
 {proposals_and_critiques}"""
+
+
+human_supervisor_status_prompt = """## Research Status Report
+
+**Research Brief:** {research_brief}
+
+**Research Findings So Far ({num_notes} notes collected):**
+{findings_summary}
+
+**Negotiation Status:**
+- Rounds completed: {negotiation_round} / {negotiation_max_rounds}
+- Geneticist proposals: {num_geneticist_proposals}
+- Systems Theorist proposals: {num_systems_theorist_proposals}
+- Predictive Cognition proposals: {num_predictive_cognition_proposals}
+- Critiques collected: {num_critiques}
+- Hypotheses bundle: {has_hypotheses_bundle}
+
+---
+
+You are the **human supervisor**. You can direct the research by telling me what to do next. Here are your options:
+
+1. **Conduct research** — tell me what topic to research, e.g. *"Research the role of epigenetic markers in stress response"*
+2. **Query a specialist** — ask a specific expert a question, e.g. *"Ask the geneticist: What genes are involved in circadian rhythm regulation?"*
+3. **Run a negotiation round** — instruct the specialists to negotiate, e.g. *"Run a negotiation round focused on proposing testable hypotheses about sleep"*
+4. **Recall from negotiation** — search past negotiation history, e.g. *"Recall what the systems theorist said about feedback loops"*
+5. **Synthesize negotiation** — create the final hypotheses bundle from all rounds
+6. **Provide feedback** — give guidance on the research direction
+7. **Generate report** — when you're satisfied, ask me to generate the final report
+
+Simply type your instruction and I'll carry it out.
+"""
+
+
+human_directive_classification_prompt = """You are an assistant that classifies a human supervisor's instruction into a structured directive.
+
+The human supervisor is directing a deep research system. They can:
+1. Ask for more research on a topic ("conduct_research")
+2. Query a specific specialist: geneticist, systems_theorist, or predictive_cognition ("query_specialist")
+3. Run a negotiation round with instructions ("conduct_negotiation_round")
+4. Recall information from negotiation history ("recall_from_negotiation")
+5. Synthesize all negotiation rounds into hypotheses ("synthesize_negotiation")
+6. Ask for the final report to be generated ("generate_report")
+7. Provide general feedback or guidance ("provide_feedback")
+
+The human's message is:
+<message>
+{human_message}
+</message>
+
+Classify this into one of the actions above. Extract the relevant content (research topic, question, instructions, etc.).
+If the action is "query_specialist", also identify which specialist is being addressed.
+If the action is "recall_from_negotiation" and a specialist is mentioned, identify them.
+
+Return a JSON object with these exact keys:
+- "action": one of "conduct_research", "query_specialist", "conduct_negotiation_round", "recall_from_negotiation", "synthesize_negotiation", "generate_report", "provide_feedback"
+- "content": the extracted content/question/instructions
+- "specialist": the specialist name if applicable (one of "geneticist", "systems_theorist", "predictive_cognition"), or null
+"""
