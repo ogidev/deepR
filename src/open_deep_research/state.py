@@ -29,6 +29,24 @@ class QuerySpecialist(BaseModel):
     )
 
 
+class ConductNegotiationRound(BaseModel):
+    """Run one round of specialist negotiation and return results."""
+    round_instructions: str = Field(
+        description="High-level instructions for what this round should focus on"
+    )
+
+
+class RecallFromNegotiation(BaseModel):
+    """Ask the orchestrator to recall specific information from the negotiation history."""
+    query: str = Field(
+        description="What to recall, e.g. 'What did the geneticist propose about epigenetic markers?'"
+    )
+    specialist_filter: Optional[Literal["geneticist", "systems_theorist", "predictive_cognition"]] = Field(
+        default=None,
+        description="Optionally filter recall to a specific specialist's contributions"
+    )
+
+
 class SupervisorSpecialistQuery(BaseModel):
     """Query from supervisor to a specific specialist."""
     specialist_role: Literal["geneticist", "systems_theorist", "predictive_cognition"]
@@ -138,9 +156,15 @@ class AgentState(MessagesState):
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
-    # Scientific negotiation outputs
-    hypotheses_bundle: Optional[HypothesesBundle] = None
+    # Scientific negotiation outputs promoted from negotiation subgraph
+    negotiation_round: int
+    negotiation_max_rounds: int
     negotiation_messages: Annotated[list[MessageLikeRepresentation], override_reducer] = []
+    geneticist_proposals: List[Hypothesis]
+    systems_theorist_proposals: List[Hypothesis]
+    predictive_cognition_proposals: List[Hypothesis]
+    critiques: Annotated[list[str], override_reducer] = []
+    hypotheses_bundle: Optional[HypothesesBundle] = None
 
 class SupervisorState(TypedDict):
     """State for the supervisor that manages research tasks."""
@@ -152,6 +176,15 @@ class SupervisorState(TypedDict):
     raw_notes: Annotated[list[str], override_reducer]
     specialist_queries: Annotated[list[dict], operator.add]
     specialist_responses: Annotated[list[dict], operator.add]
+    # Negotiation state visible to supervisor
+    negotiation_round: int
+    negotiation_max_rounds: int
+    negotiation_messages: Annotated[list[MessageLikeRepresentation], operator.add]
+    geneticist_proposals: List[Hypothesis]
+    systems_theorist_proposals: List[Hypothesis]
+    predictive_cognition_proposals: List[Hypothesis]
+    critiques: Annotated[list[str], operator.add]
+    hypotheses_bundle: Optional[HypothesesBundle]
 
 
 class NegotiationState(TypedDict):
