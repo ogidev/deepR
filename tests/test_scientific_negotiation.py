@@ -12,6 +12,7 @@ from open_deep_research.state import (
     SupervisorSpecialistQuery,
     ConductNegotiationRound,
     RecallFromNegotiation,
+    SynthesizeNegotiation,
 )
 from open_deep_research.configuration import Configuration
 
@@ -321,6 +322,22 @@ class TestRecallFromNegotiationModel:
                 query="Test query",
                 specialist_filter="invalid_specialist"
             )
+
+
+class TestSynthesizeNegotiationModel:
+    """Tests for the SynthesizeNegotiation Pydantic model."""
+    
+    def test_synthesize_with_default_instructions(self):
+        """Test creating a synthesis call with default instructions."""
+        synthesis = SynthesizeNegotiation()
+        assert synthesis.synthesis_instructions == "Synthesize all proposals and critiques into a comprehensive hypotheses bundle"
+    
+    def test_synthesize_with_custom_instructions(self):
+        """Test creating a synthesis call with custom instructions."""
+        custom_instructions = "Focus on the most testable hypotheses and generate specific predictions"
+        synthesis = SynthesizeNegotiation(synthesis_instructions=custom_instructions)
+        assert synthesis.synthesis_instructions == custom_instructions
+        assert "testable hypotheses" in synthesis.synthesis_instructions
 
 
 if __name__ == "__main__":

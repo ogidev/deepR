@@ -52,6 +52,7 @@ from open_deep_research.state import (
     ResearchQuestion,
     SupervisorSpecialistQuery,
     SupervisorState,
+    SynthesizeNegotiation,
 )
 from open_deep_research.utils import (
     anthropic_websearch_called,
@@ -276,6 +277,105 @@ Question: {sanitized_question}
     return str(response.content)
 
 
+async def synthesize_negotiation(
+    state: SupervisorState,
+    config: RunnableConfig,
+    synthesis_instructions: str
+) -> HypothesesBundle:
+    """Synthesize all negotiation outputs into a structured HypothesesBundle.
+    
+    This function takes all accumulated proposals and critiques from negotiation rounds
+    and synthesizes them into a comprehensive hypotheses bundle with predictions,
+    open questions, and documented disagreements.
+    
+    Args:
+        state: Current supervisor state with all negotiation data
+        config: Runtime configuration
+        synthesis_instructions: Instructions for synthesis process
+        
+    Returns:
+        HypothesesBundle with synthesized hypotheses and predictions
+    """
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Use negotiation model or fall back to research model
+    model_name = configurable.negotiation_model or configurable.research_model
+    model_config = {
+        "model": model_name,
+        "max_tokens": configurable.negotiation_max_tokens,
+        "api_key": get_api_key_for_model(model_name, config),
+        "tags": ["langsmith:nostream"]
+    }
+    
+    # Gather all proposals
+    all_hypotheses = []
+    for h in state.get("geneticist_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Geneticist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in state.get("systems_theorist_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Systems Theorist) {h.statement}\n  Rationale: {h.rationale}")
+    for h in state.get("predictive_cognition_proposals", []):
+        all_hypotheses.append(f"[{h.id}] (Predictive Cognition) {h.statement}\n  Rationale: {h.rationale}")
+    
+    all_hypotheses_text = "\n\n".join(all_hypotheses) if all_hypotheses else "No hypotheses proposed yet"
+    critiques_text = "\n\n".join(state.get("critiques", [])) if state.get("critiques") else "No critiques provided yet"
+    
+    # Extract convergence notes from negotiation messages
+    messages = state.get("negotiation_messages", [])
+    convergence_notes = ""
+    if messages:
+        # Get recent messages (skip initial orchestrator messages)
+        recent_messages = [
+            str(m.content) for m in messages[-20:] if hasattr(m, 'content')
+        ]
+        convergence_notes = "\n".join(recent_messages)[:5000]
+    
+    # Prepare synthesis prompt
+    synthesis_prompt = negotiation_synthesis_prompt.format(
+        research_brief=state.get("research_brief", ""),
+        all_hypotheses=all_hypotheses_text,
+        all_critiques=critiques_text,
+        convergence_notes=convergence_notes
+    )
+    
+    # Add custom synthesis instructions
+    full_prompt = f"{synthesis_prompt}\n\nAdditional Synthesis Instructions:\n{synthesis_instructions}"
+    
+    model = configurable_model.with_config(model_config)
+    
+    try:
+        # Try to get structured output
+        structured_model = model.with_structured_output(HypothesesBundle).with_retry(
+            stop_after_attempt=configurable.max_structured_output_retries
+        )
+        
+        response = await structured_model.ainvoke([
+            SystemMessage(content="You are synthesizing scientific negotiation outputs."),
+            HumanMessage(content=full_prompt)
+        ])
+        
+        return response
+        
+    except Exception:
+        # Fall back to manual bundle construction if structured output fails
+        all_proposals = (
+            state.get("geneticist_proposals", []) +
+            state.get("systems_theorist_proposals", []) +
+            state.get("predictive_cognition_proposals", [])
+        )
+        
+        # Create a basic bundle from collected proposals, limiting to top hypotheses
+        MAX_FALLBACK_HYPOTHESES = 8
+        return HypothesesBundle(
+            hypotheses=all_proposals[:MAX_FALLBACK_HYPOTHESES],
+            predictions=[],
+            open_questions=[
+                "Further research needed to validate hypotheses",
+                "Cross-disciplinary experiments recommended"
+            ],
+            disagreements=[]
+        )
+
+
 async def conduct_single_negotiation_round(
     state: SupervisorState, 
     config: RunnableConfig, 
@@ -462,7 +562,7 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     }
     
     # Available tools: research delegation, completion signaling, specialist queries, negotiation control, and strategic thinking
-    lead_researcher_tools = [ConductResearch, ResearchComplete, QuerySpecialist, ConductNegotiationRound, RecallFromNegotiation, think_tool]
+    lead_researcher_tools = [ConductResearch, ResearchComplete, QuerySpecialist, ConductNegotiationRound, RecallFromNegotiation, SynthesizeNegotiation, think_tool]
     
     # Configure model with tools, retry logic, and model settings
     research_model = (
@@ -679,6 +779,52 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 all_tool_messages.append(ToolMessage(
                     content=error_msg,
                     name="RecallFromNegotiation",
+                    tool_call_id=tool_call["id"]
+                ))
+    
+    # Handle SynthesizeNegotiation calls (create final hypotheses bundle)
+    synthesize_calls = [
+        tool_call for tool_call in most_recent_message.tool_calls
+        if tool_call["name"] == "SynthesizeNegotiation"
+    ]
+    
+    if synthesize_calls:
+        for tool_call in synthesize_calls:
+            synthesis_instructions = tool_call["args"].get("synthesis_instructions", 
+                "Synthesize all proposals and critiques into a comprehensive hypotheses bundle")
+            
+            try:
+                # Execute synthesis
+                hypotheses_bundle = await synthesize_negotiation(
+                    state=state,
+                    config=config,
+                    synthesis_instructions=synthesis_instructions
+                )
+                
+                # Format response
+                num_hypotheses = len(hypotheses_bundle.hypotheses)
+                num_predictions = len(hypotheses_bundle.predictions)
+                num_disagreements = len(hypotheses_bundle.disagreements)
+                
+                response_content = f"[Synthesis Complete]\n"
+                response_content += f"Generated {num_hypotheses} hypotheses, {num_predictions} predictions, "
+                response_content += f"{num_disagreements} documented disagreements.\n\n"
+                response_content += f"Hypotheses: {', '.join([h.id for h in hypotheses_bundle.hypotheses])}\n"
+                
+                all_tool_messages.append(ToolMessage(
+                    content=response_content,
+                    name="SynthesizeNegotiation",
+                    tool_call_id=tool_call["id"]
+                ))
+                
+                # Update state with synthesized bundle
+                update_payload["hypotheses_bundle"] = hypotheses_bundle
+                
+            except Exception as e:
+                error_msg = f"Error synthesizing negotiation: {str(e)}"
+                all_tool_messages.append(ToolMessage(
+                    content=error_msg,
+                    name="SynthesizeNegotiation",
                     tool_call_id=tool_call["id"]
                 ))
     

@@ -90,13 +90,14 @@ When the research brief calls for multi-perspective scientific negotiation, you 
 </Task>
 
 <Available Tools>
-You have access to six main tools:
+You have access to seven main tools:
 1. **ConductResearch**: Delegate research tasks to specialized sub-agents
 2. **ResearchComplete**: Indicate that research is complete
 3. **QuerySpecialist**: Directly consult specialist experts when needed
 4. **ConductNegotiationRound**: Run one round of specialist negotiation with custom instructions
 5. **RecallFromNegotiation**: Query the conversation history from negotiation rounds
-6. **think_tool**: For reflection and strategic planning during research
+6. **SynthesizeNegotiation**: Create final hypotheses bundle from all negotiation rounds
+7. **think_tool**: For reflection and strategic planning during research
 
 **CRITICAL: Use think_tool before calling ConductResearch to plan your approach, and after each ConductResearch to assess progress. Do not call think_tool with any other tools in parallel.**
 </Available Tools>
@@ -132,6 +133,13 @@ When hypothesis generation is required, you can now control the negotiation proc
 - Returns focused excerpts relevant to your query
 - Example: RecallFromNegotiation(query="What variables did the systems theorist identify?")
 
+**SynthesizeNegotiation(synthesis_instructions="...")**
+- Creates a final HypothesesBundle from all negotiation rounds
+- Synthesizes proposals, critiques, and convergence notes into structured output
+- Returns hypotheses, predictions, open questions, and documented disagreements
+- Call this after all negotiation rounds are complete
+- Example: SynthesizeNegotiation(synthesis_instructions="Focus on most testable hypotheses")
+
 **Iterative Workflow Pattern:**
 ```
 1. Conduct research to gather evidence
@@ -141,7 +149,8 @@ When hypothesis generation is required, you can now control the negotiation proc
 5. RecallFromNegotiation("What did the systems theorist say about feedback loops?")
 6. ConductNegotiationRound("Critique other specialists' hypotheses")
 7. ConductNegotiationRound("Converge on final predictions")
-8. ResearchComplete
+8. SynthesizeNegotiation("Create comprehensive hypotheses bundle")
+9. ResearchComplete
 ```
 
 **Key Benefits:**

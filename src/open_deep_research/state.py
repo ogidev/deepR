@@ -47,6 +47,14 @@ class RecallFromNegotiation(BaseModel):
     )
 
 
+class SynthesizeNegotiation(BaseModel):
+    """Synthesize all negotiation rounds into a final HypothesesBundle."""
+    synthesis_instructions: str = Field(
+        default="Synthesize all proposals and critiques into a comprehensive hypotheses bundle",
+        description="Optional instructions for the synthesis process"
+    )
+
+
 class SupervisorSpecialistQuery(BaseModel):
     """Query from supervisor to a specific specialist."""
     specialist_role: Literal["geneticist", "systems_theorist", "predictive_cognition"]
