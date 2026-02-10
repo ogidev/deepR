@@ -52,7 +52,7 @@ Contains two earlier research implementations:
 - **MCP Servers** - Model Context Protocol for extended capabilities
 
 ## Development Commands
-- `uvx langgraph dev` - Start development server with LangGraph Studio
+- `uvx langgraph dev` - Start development server with LangGraph Studio (see [LangGraph Studio documentation](README.md#-langgraph-studio-ui) for usage details)
 - `python tests/run_evaluate.py` - Run comprehensive evaluations
 - `ruff check` - Code linting
 - `mypy` - Type checking
@@ -60,7 +60,7 @@ Contains two earlier research implementations:
 ## Configuration
 All settings configurable via:
 - Environment variables (`.env` file)
-- Web UI in LangGraph Studio
+- Web UI in LangGraph Studio (interactive interface for testing and configuration)
 - Direct configuration modification
 
 Key settings include model selection, search API choice, concurrency limits, and MCP server configurations.

@@ -54,6 +54,8 @@ Use this to open the Studio UI:
 - 📚 API Docs: http://127.0.0.1:2024/docs
 ```
 
+> **About LangGraph Studio**: LangGraph Studio is an interactive web-based development and debugging tool for LangGraph applications. It provides a visual interface for interacting with agents, configuring settings, and debugging execution. While the Studio UI is hosted at `smith.langchain.com`, your agent runs entirely on your local machine. See the [main README](../../README.md#-langgraph-studio-ui) for more details on using LangGraph Studio.
+
 #### Multi-agent
 
 (1) Chat with the agent about your topic of interest, and it will initiate report generation:

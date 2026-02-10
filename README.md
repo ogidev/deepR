@@ -57,6 +57,49 @@ This will open the LangGraph Studio UI in your browser.
 
 Ask a question in the `messages` input field and click `Submit`. Select different configuration in the "Manage Assistants" tab.
 
+### 🎨 LangGraph Studio UI
+
+LangGraph Studio is an interactive web-based development and debugging tool for LangGraph applications. It provides a visual interface for interacting with and testing LangGraph agents like Open Deep Research.
+
+#### What is LangGraph Studio?
+
+LangGraph Studio is a standalone development and debugging tool for LangGraph applications that can optionally integrate with [LangSmith](https://smith.langchain.com/) for observability. When you run `langgraph dev`, it starts a local development server that connects to the LangGraph Studio web interface. The Studio provides:
+
+- **Visual graph execution**: See your agent's workflow in real-time as it processes requests
+- **Interactive testing**: Submit queries and watch the agent work step-by-step
+- **Configuration management**: Easily change model settings, search APIs, and other parameters without editing code
+- **Debugging tools**: Inspect intermediate states, view tool calls, and trace execution paths
+- **Thread management**: Maintain conversation history and manage multiple research sessions
+
+#### How to Access LangGraph Studio
+
+After running the quickstart command:
+```bash
+uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
+```
+
+The terminal will display URLs including:
+```
+- 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+```
+
+Click this link or copy it to your browser to open LangGraph Studio. The Studio connects to your locally running LangGraph server.
+
+> **Note**: The Studio UI is a web application hosted at `smith.langchain.com`, but it functions as a client-side interface that communicates directly with your local LangGraph server at `http://127.0.0.1:2024`. Your code and data remain on your local machine—the web interface simply provides the UI to interact with your locally running agent.
+
+#### Using LangGraph Studio with Open Deep Research
+
+1. **Start a research session**: Enter your research topic in the `messages` input field and click "Submit"
+2. **Watch the agent work**: The graph visualization shows the current execution state and progress
+3. **View results**: The final research report appears in the output panel as markdown
+4. **Configure settings**: Click "Manage Assistants" to access configuration options:
+   - Select different LLM models for various tasks
+   - Change search API providers (Tavily, DuckDuckGo, etc.)
+   - Adjust concurrency and other parameters
+5. **Manage threads**: Create new threads for different research topics or continue previous sessions
+
+For more details on LangGraph Studio, see the [LangGraph Studio documentation](https://langchain-ai.github.io/langgraph/concepts/langgraph_studio/).
+
 ### ⚙️ Configurations
 
 #### LLM :brain:
