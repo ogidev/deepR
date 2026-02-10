@@ -2174,7 +2174,7 @@ async def process_human_directive(
             if raw:
                 update["raw_notes"] = raw
         except Exception as e:
-            result_message = f"Error conducting research: {e}"
+            result_message = f"Error conducting research on '{content[:100]}': {e}"
 
     elif action == "query_specialist":
         if not specialist:
@@ -2193,7 +2193,7 @@ async def process_human_directive(
                 specialist_name = specialist.replace("_", " ").title()
                 result_message = f"**{specialist_name} Response:**\n{response}"
             except Exception as e:
-                result_message = f"Error querying specialist: {e}"
+                result_message = f"Error querying {specialist} with question '{content[:100]}': {e}"
 
     elif action == "conduct_negotiation_round":
         try:
@@ -2225,7 +2225,7 @@ async def process_human_directive(
                 if key in round_result:
                     update[key] = round_result[key]
         except Exception as e:
-            result_message = f"Error conducting negotiation round: {e}"
+            result_message = f"Error conducting negotiation round with instructions '{content[:100]}': {e}"
 
     elif action == "recall_from_negotiation":
         try:
@@ -2241,7 +2241,7 @@ async def process_human_directive(
                 f"Query: {content}\n\n{recall_result}"
             )
         except Exception as e:
-            result_message = f"Error recalling from negotiation: {e}"
+            result_message = f"Error recalling with query '{content[:100]}' (specialist: {specialist or 'all'}): {e}"
 
     elif action == "synthesize_negotiation":
         try:
@@ -2264,7 +2264,7 @@ async def process_human_directive(
                 ) + "\n"
             update["hypotheses_bundle"] = hypotheses_bundle
         except Exception as e:
-            result_message = f"Error synthesizing negotiation: {e}"
+            result_message = f"Error synthesizing with instructions '{content[:100]}': {e}"
 
     elif action == "provide_feedback":
         # Feedback is stored in messages for context
