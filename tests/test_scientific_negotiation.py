@@ -8,6 +8,8 @@ from open_deep_research.state import (
     HypothesesBundle,
     NegotiationState,
     AgentState,
+    QuerySpecialist,
+    SupervisorSpecialistQuery,
 )
 from open_deep_research.configuration import Configuration
 
@@ -174,6 +176,81 @@ class TestNegotiationState:
         
         for key in expected_keys:
             assert key in hints, f"NegotiationState missing key: {key}"
+
+
+class TestQuerySpecialistModel:
+    """Tests for the QuerySpecialist Pydantic model."""
+    
+    def test_query_specialist_creation_geneticist(self):
+        """Test creating a query for geneticist specialist."""
+        query = QuerySpecialist(
+            specialist="geneticist",
+            question="What genetic mechanisms might explain X?"
+        )
+        assert query.specialist == "geneticist"
+        assert query.question == "What genetic mechanisms might explain X?"
+    
+    def test_query_specialist_creation_systems_theorist(self):
+        """Test creating a query for systems theorist specialist."""
+        query = QuerySpecialist(
+            specialist="systems_theorist",
+            question="What feedback loops could produce this behavior?"
+        )
+        assert query.specialist == "systems_theorist"
+        assert query.question == "What feedback loops could produce this behavior?"
+    
+    def test_query_specialist_creation_predictive_cognition(self):
+        """Test creating a query for predictive cognition specialist."""
+        query = QuerySpecialist(
+            specialist="predictive_cognition",
+            question="What Bayesian priors are relevant here?"
+        )
+        assert query.specialist == "predictive_cognition"
+        assert query.question == "What Bayesian priors are relevant here?"
+    
+    def test_query_specialist_invalid_specialist(self):
+        """Test that invalid specialist role raises validation error."""
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            QuerySpecialist(
+                specialist="invalid_role",
+                question="Test question"
+            )
+
+
+class TestSupervisorSpecialistQueryModel:
+    """Tests for the SupervisorSpecialistQuery Pydantic model."""
+    
+    def test_supervisor_query_minimal(self):
+        """Test creating a supervisor query with minimal fields."""
+        query = SupervisorSpecialistQuery(
+            specialist_role="geneticist",
+            question="What is the role of gene X?"
+        )
+        assert query.specialist_role == "geneticist"
+        assert query.question == "What is the role of gene X?"
+        assert query.context == ""  # default
+    
+    def test_supervisor_query_with_context(self):
+        """Test creating a supervisor query with context."""
+        query = SupervisorSpecialistQuery(
+            specialist_role="systems_theorist",
+            question="How do these systems interact?",
+            context="Based on the research findings about feedback loops..."
+        )
+        assert query.specialist_role == "systems_theorist"
+        assert query.question == "How do these systems interact?"
+        assert query.context == "Based on the research findings about feedback loops..."
+    
+    def test_supervisor_query_all_specialists(self):
+        """Test that all three specialist roles are valid."""
+        specialists = ["geneticist", "systems_theorist", "predictive_cognition"]
+        
+        for specialist in specialists:
+            query = SupervisorSpecialistQuery(
+                specialist_role=specialist,
+                question=f"Question for {specialist}"
+            )
+            assert query.specialist_role == specialist
 
 
 if __name__ == "__main__":

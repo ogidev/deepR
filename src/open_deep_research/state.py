@@ -1,7 +1,7 @@
 """Graph state definitions and data structures for the Deep Research agent."""
 
 import operator
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from langchain_core.messages import MessageLikeRepresentation
 from langgraph.graph import MessagesState
@@ -17,6 +17,23 @@ class ConductResearch(BaseModel):
     research_topic: str = Field(
         description="The topic to research. Should be a single topic, and should be described in high detail (at least a paragraph).",
     )
+
+
+class QuerySpecialist(BaseModel):
+    """Query a specific specialist directly for expert opinion."""
+    specialist: Literal["geneticist", "systems_theorist", "predictive_cognition"] = Field(
+        description="Which specialist to query"
+    )
+    question: str = Field(
+        description="The specific question to ask this specialist"
+    )
+
+
+class SupervisorSpecialistQuery(BaseModel):
+    """Query from supervisor to a specific specialist."""
+    specialist_role: Literal["geneticist", "systems_theorist", "predictive_cognition"]
+    question: str = Field(description="Specific question for the specialist")
+    context: str = Field(default="", description="Additional context for the query")
 
 
 ###################
@@ -130,9 +147,11 @@ class SupervisorState(TypedDict):
     
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: str
-    notes: Annotated[list[str], override_reducer] = []
-    research_iterations: int = 0
-    raw_notes: Annotated[list[str], override_reducer] = []
+    notes: Annotated[list[str], override_reducer]
+    research_iterations: int
+    raw_notes: Annotated[list[str], override_reducer]
+    specialist_queries: Annotated[list[dict], operator.add]
+    specialist_responses: Annotated[list[dict], operator.add]
 
 
 class NegotiationState(TypedDict):
