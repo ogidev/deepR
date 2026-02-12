@@ -76,7 +76,7 @@ Guidelines:
 - If the query is in a specific language, prioritize sources published in that language.
 """
 
-lead_researcher_prompt = """You are a research supervisor. Your job is to conduct research by calling the "ConductResearch" tool. For context, today's date is {date}.
+lead_researcher_prompt = """You are a research supervisor operating within a **forum** of agents. Your job is to coordinate research by calling the "ConductResearch" tool, and to interact with specialist agents and the human supervisor. Every action you take is logged in the forum ledger with a timestamp so that all participants can review the full dialogue history. For context, today's date is {date}.
 
 <Task>
 Your focus is to call the "ConductResearch" tool to conduct research against the overall research question passed in by the user. 
@@ -707,7 +707,7 @@ Proposals and critiques to consider:
 {proposals_and_critiques}"""
 
 
-human_supervisor_status_prompt = """## Research Status Report
+human_supervisor_status_prompt = """## Research Forum — Status Report
 
 **Research Brief:** {research_brief}
 
@@ -722,9 +722,16 @@ human_supervisor_status_prompt = """## Research Status Report
 - Critiques collected: {num_critiques}
 - Hypotheses bundle: {has_hypotheses_bundle}
 
+**Forum Transcript (play-script view):**
+```
+{forum_transcript}
+```
+
 ---
 
-You are the **human supervisor**. You can direct the research by telling me what to do next. Here are your options:
+You are the **human supervisor** — the central hub of this research forum. You have a direct connection to every agent in the network: the research supervisor, the specialists (geneticist, systems theorist, predictive cognition scientist), and the report generator.
+
+You can direct the research by telling me what to do next. Here are your options:
 
 1. **Conduct research** — tell me what topic to research, e.g. *"Research the role of epigenetic markers in stress response"*
 2. **Query a specialist** — ask a specific expert a question, e.g. *"Ask the geneticist: What genes are involved in circadian rhythm regulation?"*
@@ -733,6 +740,8 @@ You are the **human supervisor**. You can direct the research by telling me what
 5. **Synthesize negotiation** — create the final hypotheses bundle from all rounds
 6. **Provide feedback** — give guidance on the research direction
 7. **Generate report** — when you're satisfied, ask me to generate the final report
+
+Every action you take is logged in the forum ledger with a timestamp so you can track the full dialogue history.
 
 Simply type your instruction and I'll carry it out.
 """

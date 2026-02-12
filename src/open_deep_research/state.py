@@ -1,6 +1,20 @@
-"""Graph state definitions and data structures for the Deep Research agent."""
+"""Graph state definitions and data structures for the Deep Research agent.
+
+Architecture: Forum-based multi-agent coordination.
+
+The system is optimised for a *forum* topology in which every agent node
+(research supervisor, specialists, researcher, human supervisor) can
+communicate with every other node via conditional, interruptible edges.
+
+State is maintained as a **ledger** — an append-only log of timestamped
+``LedgerEntry`` records that preserves the full network history — rather
+than a rolling summary.  The ``forum_transcript`` field accumulates a
+play-script–style dialogue so that every participant's contributions are
+visible at all stages.
+"""
 
 import operator
+from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Literal, Optional
 
 from langchain_core.messages import MessageLikeRepresentation
@@ -155,6 +169,65 @@ class HypothesesBundle(BaseModel):
 class ResearchComplete(BaseModel):
     """Call this tool to indicate that the research is complete."""
 
+
+###################
+# Forum Ledger Models
+###################
+
+class LedgerEntry(BaseModel):
+    """A single entry in the forum ledger.
+
+    The ledger is the central state artefact of the forum architecture.
+    Every meaningful action — research delegation, specialist response,
+    human directive, negotiation round, etc. — is recorded as an
+    immutable ``LedgerEntry`` so that the full network history is
+    preserved with timestamps.
+    """
+
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+        description="ISO-8601 UTC timestamp of when the entry was created",
+    )
+    agent: str = Field(
+        description="The agent or participant that produced this entry "
+        "(e.g. 'human_supervisor', 'research_supervisor', 'geneticist', "
+        "'systems_theorist', 'predictive_cognition', 'researcher')",
+    )
+    action: str = Field(
+        description="Short label for the action taken (e.g. 'directive', "
+        "'research_result', 'proposal', 'critique', 'feedback')",
+    )
+    content: str = Field(
+        description="The substantive content of this ledger entry",
+    )
+    target: Optional[str] = Field(
+        default=None,
+        description="The agent or node this entry is addressed to, if any",
+    )
+    metadata: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional key-value metadata (e.g. round number, topic)",
+    )
+
+
+def format_ledger_entry_as_script_line(entry: LedgerEntry) -> str:
+    """Format a single ledger entry as a play-script line.
+
+    The forum transcript is styled like the script of a play so that all
+    participants' contributions are easy to follow at every stage.
+
+    Example output::
+
+        [2025-07-12T09:14:22+00:00] RESEARCH_SUPERVISOR → RESEARCHER:
+            (research_result) Compressed findings on epigenetic markers …
+    """
+    target_str = f" → {entry.target.upper()}" if entry.target else ""
+    return (
+        f"[{entry.timestamp}] {entry.agent.upper()}{target_str}:\n"
+        f"    ({entry.action}) {entry.content}"
+    )
+
+
 class Summary(BaseModel):
     """Research summary with key findings."""
     
@@ -197,13 +270,25 @@ class AgentInputState(MessagesState):
     """InputState is only 'messages'."""
 
 class AgentState(MessagesState):
-    """Main agent state containing messages and research data."""
+    """Main agent state containing messages and research data.
+
+    The state follows a **forum** architecture:
+    - ``ledger``: append-only log of timestamped ``LedgerEntry`` records
+      capturing the full network history of all agent interactions.
+    - ``forum_transcript``: play-script–style dialogue string built from
+      ledger entries so that every participant's contributions are
+      visible at all stages.
+    """
     
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: Optional[str]
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
+    # Forum ledger: append-only timestamped log of all agent interactions
+    ledger: Annotated[list[dict], operator.add] = []
+    # Play-script transcript built from ledger entries
+    forum_transcript: Annotated[list[str], operator.add] = []
     # Scientific negotiation state promoted from negotiation subgraph
     negotiation_round: int = 0
     negotiation_max_rounds: int = 2
@@ -226,6 +311,9 @@ class SupervisorState(TypedDict):
     raw_notes: Annotated[list[str], override_reducer]
     specialist_queries: Annotated[list[dict], operator.add]
     specialist_responses: Annotated[list[dict], operator.add]
+    # Forum ledger: append-only timestamped log of all agent interactions
+    ledger: Annotated[list[dict], operator.add]
+    forum_transcript: Annotated[list[str], operator.add]
     # Negotiation state visible to supervisor
     negotiation_round: int
     negotiation_max_rounds: int

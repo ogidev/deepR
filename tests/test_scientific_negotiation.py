@@ -474,7 +474,7 @@ class TestBuildStatusMessage:
 
 
 class TestGraphStructure:
-    """Tests for the human supervisor graph structure."""
+    """Tests for the forum-based graph structure."""
 
     def test_graph_has_human_supervisor_node(self):
         """Test that the compiled graph includes the human_supervisor node."""
@@ -497,6 +497,240 @@ class TestGraphStructure:
         ]
         for node in expected_nodes:
             assert node in deep_researcher.nodes
+
+    def test_graph_has_all_agent_nodes(self):
+        """Test that the graph contains nodes representing agents (not just subtasks)."""
+        from open_deep_research.deep_researcher import deep_researcher
+        agent_nodes = [
+            "clarify_with_user",
+            "write_research_brief",
+            "research_supervisor",
+            "human_supervisor",
+            "process_human_directive",
+            "final_report_generation",
+        ]
+        for node in agent_nodes:
+            assert node in deep_researcher.nodes, f"Missing agent node: {node}"
+
+
+class TestLedgerEntry:
+    """Tests for the LedgerEntry model used in the forum ledger."""
+
+    def test_ledger_entry_creation_minimal(self):
+        """Test creating a ledger entry with minimal fields."""
+        from open_deep_research.state import LedgerEntry
+        entry = LedgerEntry(
+            agent="research_supervisor",
+            action="research_result",
+            content="Found key findings on epigenetics",
+        )
+        assert entry.agent == "research_supervisor"
+        assert entry.action == "research_result"
+        assert entry.content == "Found key findings on epigenetics"
+        assert entry.target is None
+        assert entry.metadata == {}
+        # Timestamp should be auto-generated in ISO format
+        assert "T" in entry.timestamp
+
+    def test_ledger_entry_creation_full(self):
+        """Test creating a ledger entry with all fields."""
+        from open_deep_research.state import LedgerEntry
+        entry = LedgerEntry(
+            agent="human_supervisor",
+            action="directive",
+            content="Research the role of BDNF in neuroplasticity",
+            target="research_supervisor",
+            metadata={"priority": "high", "round": "1"},
+        )
+        assert entry.agent == "human_supervisor"
+        assert entry.target == "research_supervisor"
+        assert entry.metadata["priority"] == "high"
+
+    def test_ledger_entry_serialization(self):
+        """Test that ledger entries can be serialized to dict."""
+        from open_deep_research.state import LedgerEntry
+        entry = LedgerEntry(
+            agent="geneticist",
+            action="proposal",
+            content="Hypothesis about gene X",
+            target="systems_theorist",
+        )
+        data = entry.model_dump()
+        assert isinstance(data, dict)
+        assert data["agent"] == "geneticist"
+        assert data["target"] == "systems_theorist"
+        assert "timestamp" in data
+
+
+class TestFormatLedgerEntryAsScriptLine:
+    """Tests for the play-script formatting function."""
+
+    def test_format_without_target(self):
+        """Test formatting a ledger entry without a target."""
+        from open_deep_research.state import LedgerEntry, format_ledger_entry_as_script_line
+        entry = LedgerEntry(
+            agent="research_supervisor",
+            action="research_result",
+            content="Key findings on epigenetics",
+        )
+        line = format_ledger_entry_as_script_line(entry)
+        assert "RESEARCH_SUPERVISOR" in line
+        assert "(research_result)" in line
+        assert "Key findings on epigenetics" in line
+        assert "→" not in line  # No target
+
+    def test_format_with_target(self):
+        """Test formatting a ledger entry with a target."""
+        from open_deep_research.state import LedgerEntry, format_ledger_entry_as_script_line
+        entry = LedgerEntry(
+            agent="human_supervisor",
+            action="directive",
+            content="Research gene regulation",
+            target="research_supervisor",
+        )
+        line = format_ledger_entry_as_script_line(entry)
+        assert "HUMAN_SUPERVISOR → RESEARCH_SUPERVISOR" in line
+        assert "(directive)" in line
+
+    def test_format_includes_timestamp(self):
+        """Test that the formatted line includes a timestamp."""
+        from open_deep_research.state import LedgerEntry, format_ledger_entry_as_script_line
+        entry = LedgerEntry(
+            agent="geneticist",
+            action="proposal",
+            content="Hypothesis H1",
+        )
+        line = format_ledger_entry_as_script_line(entry)
+        assert line.startswith("[")
+        assert "]" in line
+
+
+class TestMakeLedgerUpdate:
+    """Tests for the _make_ledger_update helper."""
+
+    def test_make_ledger_update_structure(self):
+        """Test that _make_ledger_update returns expected keys."""
+        from open_deep_research.deep_researcher import _make_ledger_update
+        result = _make_ledger_update(
+            agent="research_supervisor",
+            action="test_action",
+            content="Test content",
+        )
+        assert "ledger" in result
+        assert "forum_transcript" in result
+        assert isinstance(result["ledger"], list)
+        assert len(result["ledger"]) == 1
+        assert isinstance(result["forum_transcript"], list)
+        assert len(result["forum_transcript"]) == 1
+
+    def test_make_ledger_update_with_target(self):
+        """Test _make_ledger_update with target and metadata."""
+        from open_deep_research.deep_researcher import _make_ledger_update
+        result = _make_ledger_update(
+            agent="human_supervisor",
+            action="directive",
+            content="Research topic X",
+            target="research_supervisor",
+            metadata={"round": "1"},
+        )
+        entry = result["ledger"][0]
+        assert entry["agent"] == "human_supervisor"
+        assert entry["target"] == "research_supervisor"
+        assert entry["metadata"]["round"] == "1"
+
+    def test_make_ledger_update_truncates_content(self):
+        """Test that long content is truncated."""
+        from open_deep_research.deep_researcher import _make_ledger_update
+        long_content = "x" * 1000
+        result = _make_ledger_update(
+            agent="test",
+            action="test",
+            content=long_content,
+        )
+        entry = result["ledger"][0]
+        assert len(entry["content"]) <= 500
+
+
+class TestAgentStateLedger:
+    """Tests for ledger and transcript fields in AgentState."""
+
+    def test_agent_state_has_ledger_field(self):
+        """Test that AgentState has the ledger field."""
+        from typing import get_type_hints
+        hints = get_type_hints(AgentState, include_extras=True)
+        assert "ledger" in hints
+
+    def test_agent_state_has_forum_transcript_field(self):
+        """Test that AgentState has the forum_transcript field."""
+        from typing import get_type_hints
+        hints = get_type_hints(AgentState, include_extras=True)
+        assert "forum_transcript" in hints
+
+
+class TestSupervisorStateLedger:
+    """Tests for ledger and transcript fields in SupervisorState."""
+
+    def test_supervisor_state_has_ledger_field(self):
+        """Test that SupervisorState has the ledger field."""
+        from typing import get_type_hints
+        from open_deep_research.state import SupervisorState
+        hints = get_type_hints(SupervisorState, include_extras=True)
+        assert "ledger" in hints
+
+    def test_supervisor_state_has_forum_transcript_field(self):
+        """Test that SupervisorState has the forum_transcript field."""
+        from typing import get_type_hints
+        from open_deep_research.state import SupervisorState
+        hints = get_type_hints(SupervisorState, include_extras=True)
+        assert "forum_transcript" in hints
+
+
+class TestBuildStatusMessageForum:
+    """Tests for forum-enhanced _build_status_message."""
+
+    def test_status_message_includes_forum_transcript(self):
+        """Test that the status message includes the forum transcript section."""
+        from open_deep_research.deep_researcher import _build_status_message
+        state = {
+            "messages": [],
+            "research_brief": "Test brief",
+            "notes": [],
+            "raw_notes": [],
+            "negotiation_round": 0,
+            "negotiation_max_rounds": 2,
+            "geneticist_proposals": [],
+            "systems_theorist_proposals": [],
+            "predictive_cognition_proposals": [],
+            "critiques": [],
+            "hypotheses_bundle": None,
+            "forum_transcript": [
+                "[2025-07-12T09:14:22+00:00] RESEARCH_SUPERVISOR:\n    (research_brief_created) Test brief",
+            ],
+        }
+        msg = _build_status_message(state)
+        assert "Forum Transcript" in msg
+        assert "RESEARCH_SUPERVISOR" in msg
+        assert "play-script" in msg.lower() or "forum" in msg.lower()
+
+    def test_status_message_empty_transcript(self):
+        """Test status message when no forum activity has occurred."""
+        from open_deep_research.deep_researcher import _build_status_message
+        state = {
+            "messages": [],
+            "research_brief": "Test brief",
+            "notes": [],
+            "raw_notes": [],
+            "negotiation_round": 0,
+            "negotiation_max_rounds": 2,
+            "geneticist_proposals": [],
+            "systems_theorist_proposals": [],
+            "predictive_cognition_proposals": [],
+            "critiques": [],
+            "hypotheses_bundle": None,
+            "forum_transcript": [],
+        }
+        msg = _build_status_message(state)
+        assert "No forum activity recorded yet" in msg
 
 
 if __name__ == "__main__":
