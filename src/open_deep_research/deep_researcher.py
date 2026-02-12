@@ -1,4 +1,14 @@
-"""Main LangGraph implementation for the Deep Research agent."""
+"""Main LangGraph implementation for the Deep Research agent.
+
+Architecture: Forum-based multi-agent coordination.
+
+The graph is structured as a **forum** — a full, nondirected, frequently
+cyclical graph — rather than a simple chain.  The human supervisor acts
+as the central hub with conditional, interruptible edges to every other
+agent node.  All interactions are recorded in a timestamped ledger and
+presented as a play-script transcript so that every participant's
+contributions are visible at all stages.
+"""
 
 import asyncio
 from typing import Any, Dict, List, Literal, Optional
@@ -46,6 +56,7 @@ from open_deep_research.state import (
     HumanDirective,
     Hypothesis,
     HypothesesBundle,
+    LedgerEntry,
     NegotiationState,
     QuerySpecialist,
     RecallFromNegotiation,
@@ -56,6 +67,7 @@ from open_deep_research.state import (
     SupervisorSpecialistQuery,
     SupervisorState,
     SynthesizeNegotiation,
+    format_ledger_entry_as_script_line,
 )
 from open_deep_research.utils import (
     anthropic_websearch_called,
@@ -81,6 +93,35 @@ MAX_NOTES_CONTEXT_LENGTH = 10000
 # Negotiation-related constants
 MAX_RECALL_MESSAGES = 50  # Max messages to include in recall context (token budget constraint)
 MAX_PREVIEW_MESSAGES = 10  # Max messages to preview in negotiation round tool response
+
+
+def _make_ledger_update(
+    agent: str,
+    action: str,
+    content: str,
+    target: Optional[str] = None,
+    metadata: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Create a ledger entry dict and its play-script transcript line.
+
+    Returns a dict suitable for merging into a ``Command.update`` payload::
+
+        {
+            "ledger": [<serialised LedgerEntry>],
+            "forum_transcript": ["[ts] AGENT → TARGET: (action) content"],
+        }
+    """
+    entry = LedgerEntry(
+        agent=agent,
+        action=action,
+        content=content[:500],  # Truncate to prevent unbounded growth
+        target=target,
+        metadata=metadata or {},
+    )
+    return {
+        "ledger": [entry.model_dump()],
+        "forum_transcript": [format_ledger_entry_as_script_line(entry)],
+    }
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
@@ -128,15 +169,26 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     # Step 4: Route based on clarification analysis
     if response.need_clarification:
         # End with clarifying question for user
+        ledger_update = _make_ledger_update(
+            agent="research_supervisor",
+            action="clarification_request",
+            content=response.question,
+            target="human_supervisor",
+        )
         return Command(
             goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
+            update={"messages": [AIMessage(content=response.question)], **ledger_update}
         )
     else:
         # Proceed to research with verification message
+        ledger_update = _make_ledger_update(
+            agent="research_supervisor",
+            action="clarification_resolved",
+            content=response.verification,
+        )
         return Command(
             goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
+            update={"messages": [AIMessage(content=response.verification)], **ledger_update}
         )
 
 
@@ -185,6 +237,13 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
         max_researcher_iterations=configurable.max_researcher_iterations
     )
     
+    ledger_update = _make_ledger_update(
+        agent="research_supervisor",
+        action="research_brief_created",
+        content=response.research_brief,
+        target="research_supervisor",
+    )
+    
     return Command(
         goto="research_supervisor", 
         update={
@@ -204,7 +263,8 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
             "systems_theorist_proposals": [],
             "predictive_cognition_proposals": [],
             "critiques": [],
-            "hypotheses_bundle": None
+            "hypotheses_bundle": None,
+            **ledger_update,
         }
     )
 
@@ -908,8 +968,27 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                     }
                 )
     
-    # Step 3: Return command with all tool results
+    # Step 3: Return command with all tool results and ledger entries
+    # Log each tool result to the forum ledger
+    ledger_entries: list[dict] = []
+    transcript_lines: list[str] = []
+    for msg in all_tool_messages:
+        entry = LedgerEntry(
+            agent="research_supervisor",
+            action=f"tool_result:{msg.name}",
+            content=str(msg.content)[:500],
+            target="research_supervisor",
+        )
+        ledger_entries.append(entry.model_dump())
+        transcript_lines.append(format_ledger_entry_as_script_line(entry))
+
     update_payload["supervisor_messages"] = all_tool_messages
+    if "ledger" not in update_payload:
+        update_payload["ledger"] = []
+    update_payload["ledger"].extend(ledger_entries)
+    if "forum_transcript" not in update_payload:
+        update_payload["forum_transcript"] = []
+    update_payload["forum_transcript"].extend(transcript_lines)
     return Command(
         goto="supervisor",
         update=update_payload
@@ -1893,10 +1972,17 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
             ])
             
             # Return successful report generation
+            ledger_update = _make_ledger_update(
+                agent="research_supervisor",
+                action="final_report_generated",
+                content="Final report successfully generated.",
+                target="human_supervisor",
+            )
             return {
                 "final_report": final_report.content, 
                 "messages": [final_report],
-                **cleared_state
+                **cleared_state,
+                **ledger_update,
             }
             
         except Exception as e:
@@ -2000,6 +2086,16 @@ def _build_status_message(state: AgentState) -> str:
 
     has_bundle = "Yes" if state.get("hypotheses_bundle") else "No"
 
+    # Include recent forum transcript lines for play-script visibility
+    transcript = state.get("forum_transcript", [])
+    if transcript:
+        recent_lines = transcript[-20:]  # Show last 20 transcript lines
+        transcript_section = "\n".join(recent_lines)
+        if len(transcript) > 20:
+            transcript_section = f"... ({len(transcript) - 20} earlier entries omitted)\n{transcript_section}"
+    else:
+        transcript_section = "No forum activity recorded yet."
+
     return human_supervisor_status_prompt.format(
         research_brief=state.get("research_brief", "Not yet defined"),
         num_notes=len(all_notes),
@@ -2011,17 +2107,27 @@ def _build_status_message(state: AgentState) -> str:
         num_predictive_cognition_proposals=len(state.get("predictive_cognition_proposals", [])),
         num_critiques=len(state.get("critiques", [])),
         has_hypotheses_bundle=has_bundle,
+        forum_transcript=transcript_section,
     )
 
 
 async def human_supervisor(
     state: AgentState, config: RunnableConfig,
-) -> Command[Literal["process_human_directive", "final_report_generation"]]:
+) -> Command[Literal["process_human_directive", "final_report_generation", "research_supervisor"]]:
     """Present research status and wait for human supervisor input.
 
-    This node uses ``interrupt()`` to pause execution and present the current
-    research state to the human user via the LangGraph Studio UI.  The human
-    can then provide a directive that is routed to the appropriate handler.
+    In the forum architecture the human supervisor has a conditional edge
+    to *every* other node, making it the central hub.  The human can
+    choose to route control to:
+    - ``process_human_directive`` — for research, specialist queries,
+      negotiation rounds, recall, synthesis, or feedback
+    - ``final_report_generation`` — when satisfied with findings
+    - ``research_supervisor`` — to kick off another automated research
+      cycle directly
+
+    This node uses ``interrupt()`` to pause execution and present the
+    current research state (including the forum transcript / play-script
+    view) to the human user via the LangGraph Studio UI.
 
     Args:
         state: Current agent state
@@ -2039,6 +2145,14 @@ async def human_supervisor(
     if isinstance(human_input, str) and human_input.strip():
         directive = await _classify_human_directive(human_input, config)
 
+        # Log the human directive to the forum ledger
+        ledger_update = _make_ledger_update(
+            agent="human_supervisor",
+            action="directive",
+            content=human_input,
+            target=directive.specialist or directive.action,
+        )
+
         # If the human asks to generate the report, go directly
         if directive.action == "generate_report":
             return Command(
@@ -2049,6 +2163,7 @@ async def human_supervisor(
                         HumanMessage(content=human_input),
                         AIMessage(content="Proceeding to final report generation."),
                     ],
+                    **ledger_update,
                 },
             )
 
@@ -2073,14 +2188,21 @@ async def human_supervisor(
                         )
                     ),
                 ],
+                **ledger_update,
             },
         )
 
     # Empty input — generate report by default
+    ledger_update = _make_ledger_update(
+        agent="human_supervisor",
+        action="generate_report",
+        content="No further instructions received. Generating final report.",
+    )
     return Command(
         goto="final_report_generation",
         update={
             "messages": [AIMessage(content="No further instructions received. Generating final report.")],
+            **ledger_update,
         },
     )
 
@@ -2280,29 +2402,60 @@ async def process_human_directive(
     update["messages"] = [AIMessage(content=result_message)]
     update["human_supervisor_messages"] = [AIMessage(content=result_message)]
 
+    # Log the result to the forum ledger
+    ledger_update = _make_ledger_update(
+        agent=action if action == "query_specialist" and specialist else "research_supervisor",
+        action=f"directive_result:{action}",
+        content=result_message,
+        target="human_supervisor",
+        metadata={"directive_action": action},
+    )
+    update.update(ledger_update)
+
     return Command(goto="human_supervisor", update=update)
 
 
 # Main Deep Researcher Graph Construction
-# Creates the complete deep research workflow from user input to final report
+# ──────────────────────────────────────────────────────────────────────
+# Forum-based topology: every agent node is reachable from the human
+# supervisor via conditional, interruptible edges.  The graph is a
+# full (nondirected, frequently cyclical) graph — not a chain.
+#
+#          ┌─────────────────────────────────────────────────┐
+#          │              HUMAN SUPERVISOR                   │
+#          │  (central hub — edge to every other node)       │
+#          └──┬──────┬──────────┬─────────────┬─────────────┘
+#             │      │          │             │
+#             ▼      ▼          ▼             ▼
+#       research   process   final_report  clarify
+#       supervisor  human    generation    _with_user
+#             ▲    directive    ▲
+#             │      │          │
+#             └──────┘          │
+#                    └──────────┘
+# ──────────────────────────────────────────────────────────────────────
+
 deep_researcher_builder = StateGraph(
     AgentState, 
     input=AgentInputState, 
     config_schema=Configuration
 )
 
-# Add main workflow nodes for the complete research process
-deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
-deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
-deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Initial automated research phase
-deep_researcher_builder.add_node("human_supervisor", human_supervisor)             # Human-in-the-loop supervisor
-deep_researcher_builder.add_node("process_human_directive", process_human_directive)  # Execute human directives
-deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
+# Add main workflow nodes — each represents an *agent* (not a subtask)
+deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # Clarification agent
+deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Brief-writing agent
+deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research supervisor agent
+deep_researcher_builder.add_node("human_supervisor", human_supervisor)             # Human supervisor agent (central hub)
+deep_researcher_builder.add_node("process_human_directive", process_human_directive)  # Directive-processing agent
+deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report-generation agent
 
-# Define main workflow edges
+# Define edges — conditional edges are handled via Command routing in
+# the node functions.  The human_supervisor node has edges to every
+# other node (research_supervisor, process_human_directive,
+# final_report_generation) through its Command returns.
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
-deep_researcher_builder.add_edge("research_supervisor", "human_supervisor")        # After initial research, hand control to human
+deep_researcher_builder.add_edge("research_supervisor", "human_supervisor")        # After research, human decides next step
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
-# Compile the complete deep researcher workflow
+# Compile the complete deep researcher forum
 deep_researcher = deep_researcher_builder.compile()
