@@ -983,8 +983,12 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
         transcript_lines.append(format_ledger_entry_as_script_line(entry))
 
     update_payload["supervisor_messages"] = all_tool_messages
-    update_payload.setdefault("ledger", []).extend(ledger_entries)
-    update_payload.setdefault("forum_transcript", []).extend(transcript_lines)
+    if "ledger" not in update_payload:
+        update_payload["ledger"] = []
+    update_payload["ledger"].extend(ledger_entries)
+    if "forum_transcript" not in update_payload:
+        update_payload["forum_transcript"] = []
+    update_payload["forum_transcript"].extend(transcript_lines)
     return Command(
         goto="supervisor",
         update=update_payload
@@ -2400,7 +2404,7 @@ async def process_human_directive(
 
     # Log the result to the forum ledger
     ledger_update = _make_ledger_update(
-        agent=action if action in ("query_specialist",) and specialist else "research_supervisor",
+        agent=action if action == "query_specialist" and specialist else "research_supervisor",
         action=f"directive_result:{action}",
         content=result_message,
         target="human_supervisor",
